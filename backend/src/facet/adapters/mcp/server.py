@@ -386,10 +386,16 @@ def kernel_info() -> dict[str, Any]:
 
 @server.tool()
 def feature_types() -> dict[str, Any]:
-    """The feature types `add_feature` will accept.
+    """The feature types `add_feature` will accept, and the options each takes.
 
     Read from the live handler registry rather than from documentation, so it
-    cannot drift from what the server actually builds.
+    cannot drift from what the server actually builds — the options listed here
+    are exactly the ones a build will accept, and anything else is refused
+    rather than ignored.
+
+    Worth reading before the first `add_feature` of a session: it saves
+    discovering that `at` wants 'sketch.point', or that a blend's `edges` is a
+    selector string rather than a list, from a build error.
     """
     return dict(client().json("GET", "/feature-types"))
 

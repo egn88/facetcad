@@ -216,11 +216,13 @@ def expression_vocabulary() -> dict[str, object]:
     return {"functions": sorted(FUNCTIONS), "constants": sorted(CONSTANTS)}
 
 
-@router.get("/feature-types", summary="Registered feature types")
+@router.get("/feature-types", summary="Registered feature types and their options")
 def feature_types() -> dict[str, object]:
-    from facet.application.features import registered_types
+    from facet.application.features import describe_types, registered_types
 
-    return {"types": list(registered_types())}
+    # 'types' stays a plain list of names for anything already reading it;
+    # 'features' carries the options each one takes.
+    return {"types": list(registered_types()), "features": list(describe_types())}
 
 
 # --------------------------------------------------------------------------

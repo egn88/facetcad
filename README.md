@@ -424,8 +424,17 @@ agent guide at `/api/mcp`.
 Not there: revolve, mirror and patterns; assembly as a joint tree with parameter-driven
 kinematics — never a mate solver, which would reintroduce exactly the nondeterminism this
 project exists to escape; dimensions and annotations on drawings; sheet metal. Geometry
-also runs in-process, so an OCCT segfault on pathological input takes the API down with
-it; isolating it in a worker pool is a known gap rather than a solved problem.
+also runs in-process, which is the sharpest edge here. OpenCascade is a C++ library
+reached through Python bindings, and a long call holds the interpreter lock: while it
+runs, nothing else in that process gets a turn, including `/api/health`. Pathological
+input can therefore wedge the whole server, and it has — once, in testing, needing a
+manual restart. Docker will not save you from it either, because `restart:` reacts to a
+process *exiting*, not to a health check failing, so a container that is alive but
+answering nothing is left alone indefinitely.
+
+Until geometry runs somewhere it can be given a deadline and killed, treat a deployment
+as needing a supervisor that restarts on unhealthy rather than on exit. Isolating the
+kernel in a worker pool is the actual fix and is not done.
 
 Countersinks need a cone, which the geometry port has no operation for yet — that is the
 one piece of the hole feature deliberately left out rather than approximated.

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from difflib import get_close_matches
 from typing import Protocol
 
 from facet.domain import standards
@@ -86,11 +87,32 @@ class FeatureBuild:
     consumes_previous: bool = True
 
 
+@dataclass(frozen=True)
+class Option:
+    """One key a feature type understands.
+
+    Declared rather than merely read, for two reasons. It lets an unknown key be
+    refused instead of silently ignored — a `counterbore` on a pad used to be
+    accepted, stored, and quietly do nothing, which is the exact failure this
+    project exists to prevent. And it lets the API say what a feature takes
+    without anyone having to provoke a build error to find out.
+    """
+
+    name: str
+    describe: str
+    required: bool = False
+
+
 class FeatureHandler(Protocol):
     """Builds one kind of feature."""
 
     @property
     def type(self) -> str:
+        ...
+
+    @property
+    def options(self) -> tuple[Option, ...]:
+        """Every key this type reads, including the optional ones."""
         ...
 
     @property
@@ -136,11 +158,63 @@ def handler_for(spec: FeatureSpec) -> FeatureHandler:
                 f"{', '.join(sorted(_REGISTRY)) or 'none'}"
             ),
         )
+    validate_options(spec)
     return handler
 
 
 def registered_types() -> tuple[str, ...]:
     return tuple(sorted(_REGISTRY))
+
+
+def describe_types() -> tuple[dict[str, object], ...]:
+    """Every feature type with the options it takes.
+
+    What `feature_types` returns. Names alone meant learning the required keys
+    from build errors — good errors, but a round trip each, and only after
+    writing something wrong.
+    """
+    return tuple(
+        {
+            "type": name,
+            "options": [
+                {
+                    "name": option.name,
+                    "describe": option.describe,
+                    "required": option.required,
+                }
+                for option in handler.options
+            ],
+        }
+        for name, handler in sorted(_REGISTRY.items())
+    )
+
+
+def validate_options(spec: FeatureSpec) -> None:
+    """Refuse a key the feature type does not read.
+
+    Without this a misspelled or misplaced option is accepted, written to the
+    document and ignored — the part builds, looks wrong, and nothing anywhere
+    says why. Everything else in this system fails loudly; this is the one place
+    that quietly did not.
+    """
+    handler = _REGISTRY.get(spec.type)
+    if handler is None:
+        return  # handler_for reports the unknown type, with the list of known ones.
+    known = {option.name for option in handler.options}
+    unknown = sorted(set(spec.options) - known)
+    if not unknown:
+        return
+    detail = []
+    for key in unknown:
+        near = get_close_matches(key, sorted(known), n=1, cutoff=0.7)
+        detail.append(f"'{key}'" + (f" (did you mean '{near[0]}'?)" if near else ""))
+    raise FeatureBuildError(
+        feature=spec.id,
+        reason=(
+            f"{spec.type} does not take {', '.join(detail)}. "
+            f"It takes: {', '.join(sorted(known)) or 'no options'}."
+        ),
+    )
 
 
 # --------------------------------------------------------------------------
@@ -240,6 +314,14 @@ class PadHandler:
         return "pad"
 
     @property
+    def options(self) -> tuple[Option, ...]:
+        return (
+            Option("length", "How far to extrude", required=True),
+            Option("midplane", "Extrude half each way from the sketch plane"),
+        Option("direction", "+1 or -1 along the profile normal"),
+        )
+
+    @property
     def required_capability(self) -> str:
         return Capability.PAD
 
@@ -288,6 +370,14 @@ class PocketHandler:
     @property
     def type(self) -> str:
         return "pocket"
+
+    @property
+    def options(self) -> tuple[Option, ...]:
+        return (
+            Option("depth", "How deep to cut; ignored when through_all is set"),
+            Option("through_all", "Cut the whole way through the material"),
+        Option("direction", "+1 or -1 along the profile normal"),
+        )
 
     @property
     def required_capability(self) -> str:
@@ -360,6 +450,20 @@ class HoleHandler:
     @property
     def type(self) -> str:
         return "hole"
+
+    @property
+    def options(self) -> tuple[Option, ...]:
+        return (
+            Option("at", "Where to drill, as 'sketch.point'", required=True),
+            Option("depth", "How deep; ignored when through_all is set"),
+            Option("through_all", "Drill the whole way through"),
+            Option("standard", "An ISO designation such as M6, instead of diameter"),
+            Option("diameter", "Explicit hole diameter, instead of standard"),
+            Option("fit", "close, normal or free — how much clearance a standard gets"),
+            Option("counterbore_diameter", "Width of the counterbore, if any"),
+            Option("counterbore_depth", "Depth of the counterbore, if any"),
+        Option("direction", "+1 or -1 along the profile normal"),
+        )
 
     @property
     def required_capability(self) -> str:
@@ -585,6 +689,23 @@ class BlendHandler:
         return self.kind
 
     @property
+    def options(self) -> tuple[Option, ...]:
+        size = "radius" if self.kind == "fillet" else "distance"
+        return (
+            Option(
+                "edges",
+                "Edge selector string such as 'a ^ b', or a comma-separated union. "
+                "A string, not a list",
+                required=True,
+            ),
+            Option(size, f"The {self.kind} size", required=True),
+            Option(
+                "on_failure",
+                "'skip' leaves the blend out rather than failing the rebuild",
+            ),
+        )
+
+    @property
     def required_capability(self) -> str:
         return Capability.FILLET if self.kind == "fillet" else Capability.CHAMFER
 
@@ -685,6 +806,22 @@ class ThreadHandler:
     @property
     def type(self) -> str:
         return "thread"
+
+    @property
+    def options(self) -> tuple[Option, ...]:
+        return (
+            Option("at", "Where to place it, as 'sketch.point'", required=True),
+            Option("standard", "ISO designation such as M6", required=True),
+            Option("depth", "Threaded length", required=True),
+            Option("internal", "True taps a hole, false threads a boss"),
+            Option("through_all", "Drill the whole way through"),
+            Option("hand", "right or left"),
+            Option(
+                "modelled",
+                "true, false, or 'export' to cut the helix for files but not the viewport",
+            ),
+        Option("direction", "+1 or -1 along the profile normal"),
+        )
 
     @property
     def required_capability(self) -> str:
