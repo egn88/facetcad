@@ -1,0 +1,545 @@
+/* A dense technical UI: dark, monospace-leaning, information-first.
+   The viewport is the only thing that gets to be big. */
+
+:root {
+  --bg: #0d1117;
+  --bg-panel: #131a23;
+  --bg-raised: #1a2430;
+  --bg-input: #0a0e14;
+  --border: #263140;
+  --border-strong: #38465a;
+
+  --text: #d7e0ea;
+  --text-dim: #8b9bb0;
+  --text-faint: #5d6b7d;
+
+  --accent: #4da3ff;
+  --accent-dim: #1e5a9e;
+  --ok: #3fb950;
+  --warn: #d29922;
+  --error: #f85149;
+  --cached: #8b949e;
+
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  --row: 26px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+  overflow: hidden;
+}
+
+button {
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: var(--border);
+  border-color: var(--accent-dim);
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+button.primary {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+
+input,
+select,
+textarea {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 3px 6px;
+  width: 100%;
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+code,
+.mono {
+  font-family: var(--mono);
+}
+
+/* ---------------------------------------------------------------- layout */
+
+.app {
+  display: grid;
+  grid-template-rows: 40px 1fr;
+  height: 100%;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 12px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.topbar h1 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0;
+  letter-spacing: 0.02em;
+}
+
+.topbar .spacer {
+  flex: 1;
+}
+
+.badge {
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--border-strong);
+  color: var(--text-dim);
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: 300px 1fr 300px;
+  min-height: 0;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border);
+}
+
+.panel.right {
+  border-right: none;
+  border-left: 1px solid var(--border);
+}
+
+.panel-section {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.panel-section.grow {
+  flex: 1;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+}
+
+.panel-header .spacer {
+  flex: 1;
+}
+
+.panel-body {
+  overflow: auto;
+  min-height: 0;
+}
+
+.viewport {
+  position: relative;
+  min-width: 0;
+  background: #070a0f;
+}
+
+/* ------------------------------------------------------------ parameters */
+
+table.sheet {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+table.sheet th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  text-align: left;
+  font-weight: 500;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+  background: var(--bg-panel);
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+table.sheet td {
+  padding: 0;
+  border-bottom: 1px solid rgba(38, 49, 64, 0.5);
+  height: var(--row);
+}
+
+table.sheet td.name {
+  padding: 0 8px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+table.sheet td.computed {
+  padding: 0 8px;
+  color: var(--text-faint);
+  text-align: right;
+  white-space: nowrap;
+}
+
+table.sheet input {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  height: var(--row);
+  padding: 0 8px;
+}
+
+table.sheet input:focus {
+  background: var(--bg-input);
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+table.sheet tr.group-header td {
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 3px 8px;
+  height: auto;
+}
+
+.derived {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+/* --------------------------------------------------------------- feature */
+
+.feature {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-bottom: 1px solid rgba(38, 49, 64, 0.5);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.feature:hover {
+  background: var(--bg-raised);
+}
+
+.feature.selected {
+  background: var(--bg-raised);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.feature .type {
+  color: var(--text-faint);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.feature .spacer {
+  flex: 1;
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.status-built {
+  background: var(--ok);
+}
+.status-cached {
+  background: var(--cached);
+}
+.status-failed {
+  background: var(--error);
+}
+.status-skipped {
+  background: var(--text-faint);
+  opacity: 0.4;
+}
+.status-suppressed {
+  background: transparent;
+  border: 1px solid var(--text-faint);
+}
+
+/* ------------------------------------------------------------ diagnostics */
+
+.diagnostic {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.diagnostic .headline {
+  color: var(--error);
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.diagnostic .reason {
+  color: var(--text-dim);
+  padding-left: 10px;
+  border-left: 2px solid var(--border-strong);
+  margin-top: 4px;
+  white-space: pre-wrap;
+}
+
+.empty {
+  padding: 14px 10px;
+  color: var(--text-faint);
+  font-size: 12px;
+  text-align: center;
+}
+
+/* --------------------------------------------------------------- overlay */
+
+.overlay {
+  position: absolute;
+  z-index: 5;
+  font-family: var(--mono);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.overlay.selection {
+  left: 10px;
+  bottom: 10px;
+  right: 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  background: rgba(19, 26, 35, 0.94);
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  pointer-events: auto;
+}
+
+.overlay.selection .tag {
+  color: var(--accent);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.overlay.hint {
+  left: 10px;
+  top: 10px;
+  color: var(--text-faint);
+  line-height: 1.7;
+}
+
+.overlay.stats {
+  right: 10px;
+  top: 10px;
+  text-align: right;
+  color: var(--text-faint);
+  line-height: 1.7;
+}
+
+/* --------------------------------------------------------------- modals */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+  background: rgba(3, 6, 10, 0.75);
+}
+
+.modal {
+  width: min(680px, 92vw);
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+
+.modal header {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.modal .content {
+  padding: 14px;
+  overflow: auto;
+}
+
+.modal footer {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+}
+
+.field {
+  margin-bottom: 10px;
+}
+
+.field label {
+  display: block;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 3px;
+}
+
+.result-list {
+  margin-top: 10px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.result-list li {
+  padding: 3px 0;
+  color: var(--accent);
+  list-style: none;
+}
+
+textarea.yaml {
+  width: 100%;
+  height: 46vh;
+  resize: none;
+  line-height: 1.5;
+}
+
+.toast {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 80;
+  padding: 8px 16px;
+  border-radius: 5px;
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+}
+
+.toast.error {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+/* Angular-specific layout hooks */
+app-root {
+  display: block;
+  height: 100%;
+}
+
+.panel-section.features {
+  max-height: 38%;
+}
+
+.panel-section.diagnostics {
+  max-height: 50%;
+}
+
+.badge.ok {
+  color: var(--ok);
+}
+
+.badge.error {
+  color: var(--error);
+}
+
+.topbar a {
+  display: inline-flex;
+  text-decoration: none;
+}
+
+
+/* Viewport toggles sit under the hint text, out of the model's way. */
+.overlay.toggles {
+  left: 10px;
+  top: 84px;
+  pointer-events: auto;
+}
+
+.overlay.toggles button {
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 2px 8px;
+  color: var(--text-faint);
+  background: transparent;
+}
+
+.overlay.toggles button.active {
+  color: #d9a441;
+  border-color: #6b5426;
+}

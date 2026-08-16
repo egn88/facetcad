@@ -1,0 +1,52 @@
+# FacetCAD — the local development stack.
+#
+# The project name is stated rather than taken from the directory, so the
+# images and containers are called facetcad-* wherever the repo is checked
+# out or whatever the folder happens to be named.
+name: facetcad
+
+services:
+  api:
+    build:
+      context: ./backend
+      args:
+        # ".": omit OpenCascade for a far smaller image, at the cost of falling
+        # back to the analytic kernel.
+        INSTALL_TARGET: ${FACET_INSTALL:-.[occt,mcp]}
+    # Tagged explicitly so a local `docker compose build` produces exactly the
+    # images the production compose expects to load. Left implicit, compose
+    # derives facetcad-api and the server would look for facetcad/api.
+    image: facetcad/api:latest
+    environment:
+      # 'auto' prefers OpenCascade when installed and falls back to the
+      # analytic kernel, so the stack runs before that dependency is added.
+      FACET_KERNEL: ${FACET_KERNEL:-auto}
+      FACET_DATA: /data/projects
+      # Hostnames the MCP endpoint answers to, comma separated. The transport
+      # refuses unknown hosts to guard against DNS rebinding; loopback is always
+      # allowed. Set to "*" only when a reverse proxy has already vetted Host.
+      FACET_HOSTS: ${FACET_HOSTS:-}
+    volumes:
+      # Documents are plain YAML on a volume: backing up or cloning a project
+      # is a file copy.
+      - facet-projects:/data/projects
+    restart: unless-stopped
+
+  web:
+    build: ./frontend
+    image: facetcad/web:latest
+    ports:
+      - "${FACET_PORT:-8080}:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  facet-projects:
+    # Named explicitly, so it is not prefixed with the compose project. Renaming
+    # the project — or the directory it is checked out into — would otherwise
+    # point at a fresh empty volume, which looks exactly like having lost every
+    # document. Moving between volumes is a one-off copy:
+    #
+    #   docker run --rm -v <old>:/from -v facet-projects:/to alpine cp -a /from/. /to/
+    name: facet-projects

@@ -1,0 +1,30 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+node_modules/
+dist/
+.vite/
+
+data/
+*.local
+.env
+.DS_Store
+
+# Local agent settings. Ignored here rather than relying on a global excludes
+# file, which protects only the machine it is configured on.
+.claude/
+
+# Local compose overrides. Anything describing a real deployment — hostnames,
+# proxy conventions, server paths — is kept outside this repository entirely
+# rather than ignored inside it, so that no single mistaken `git add -f` or
+# edit to this file can publish it.
+docker-compose.override.yml
+*.env
