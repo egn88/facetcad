@@ -6,7 +6,14 @@
  * failed.
  */
 
-import { ChangeDetectionStrategy, Component, computed, input, output } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  computed,
+  input,
+  output,
+  signal,
+} from '@angular/core';
 
 import type { FeatureView } from '../../core/models/cad.models';
 
@@ -27,7 +34,15 @@ import type { FeatureView } from '../../core/models/cad.models';
             title="Work on this body"
             (click)="bodyActivated.emit(group.body)"
           >
+            <button
+              class="twisty"
+              [title]="group.twistyTitle"
+              (click)="toggleCollapsed(group.body, $event)"
+            >
+              {{ group.twisty }}
+            </button>
             {{ group.body }}
+            <span class="count">{{ group.features.length }}</span>
             <span class="spacer"></span>
             <button [title]="group.eyeTitle" (click)="toggleVisibility(group.body, $event)">
               {{ group.eye }}
@@ -35,7 +50,7 @@ import type { FeatureView } from '../../core/models/cad.models';
             <button title="Delete this body" (click)="removeBody(group.body, $event)">×</button>
           </div>
         }
-        @for (feature of group.features; track feature.id) {
+        @for (feature of group.visibleFeatures; track feature.id) {
         <div
           class="feature"
           [class.selected]="feature.id === selected()"
@@ -74,6 +89,18 @@ import type { FeatureView } from '../../core/models/cad.models';
         cursor: pointer;
       }
       .body-head .spacer { flex: 1; }
+      /* Flat and narrow: the twisty is a hit target, not a button in its own
+         right, and must not compete with the eye and delete controls. */
+      .twisty {
+        background: none;
+        border: none;
+        padding: 0 2px;
+        color: inherit;
+        font-size: 10px;
+        line-height: 1;
+        cursor: pointer;
+      }
+      .count { opacity: 0.55; }
       /* The same marker the topology list and the feature rows use for
          "this is the one", so there is one vocabulary to learn, not two. */
       .body-head.selected { box-shadow: inset 2px 0 0 var(--accent); }
@@ -96,29 +123,55 @@ export class FeatureTreeComponent {
   readonly bodyVisibilityToggled = output<string>();
 
   /**
+   * Bodies whose features are folded away.
+   *
+   * Collapsing is a view convenience, not document state, so it lives here
+   * rather than in the store — and it is keyed on collapse rather than expand
+   * so a body that appears later starts open, which is what someone who just
+   * created it expects.
+   */
+  private readonly collapsed = signal<ReadonlySet<string>>(new Set<string>());
+
+  /**
    * The groups with every per-body flag already resolved.
    *
-   * The heading needs four answers about each body; asking for them from the
-   * template would mean four calls per row per render.
+   * The heading needs half a dozen answers about each body; asking for them
+   * from the template would mean that many calls per row per render.
    */
   readonly rows = computed(() => {
     const active = this.activeBody();
     const hidden = this.hiddenBodies();
+    const folded = this.collapsed();
+    // With a single body there is no heading, and so nothing to expand from.
+    const collapsible = this.groups().length > 1;
     return this.groups().map((group) => {
       const isHidden = hidden.has(group.body);
+      const isFolded = collapsible && folded.has(group.body);
       return {
         body: group.body,
         features: group.features,
+        visibleFeatures: isFolded ? [] : group.features,
         active: group.body === active,
         hidden: isHidden,
         eye: isHidden ? '◌' : '◉',
         eyeTitle: isHidden ? 'Show this body' : 'Hide this body',
+        twisty: isFolded ? '▸' : '▾',
+        twistyTitle: isFolded ? 'Expand this body' : 'Collapse this body',
       };
     });
   });
 
   /** One body needs no headings: there is nothing to tell it apart from. */
   readonly showHeads = computed(() => this.groups().length > 1);
+
+  toggleCollapsed(body: string, event: Event): void {
+    event.stopPropagation();
+    this.collapsed.update((folded) => {
+      const next = new Set(folded);
+      if (!next.delete(body)) next.add(body);
+      return next;
+    });
+  }
 
   toggleVisibility(body: string, event: Event): void {
     event.stopPropagation();

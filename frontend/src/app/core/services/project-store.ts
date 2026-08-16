@@ -317,24 +317,41 @@ export class ProjectStore {
   });
 
   /**
-   * One STL per body, for a document that builds more than one.
+   * What the mesh export dialog offers: the whole model, then each body alone.
    *
-   * The whole-model STL holds every body at its placement, which is right for
-   * looking at an assembly and wrong for a print bed — the parts go on one at a
-   * time. Empty for a single-body document, where the plain STL already is the
-   * part.
+   * Built here rather than in the dialog so the URLs are computed once per
+   * change instead of on every render, and so the dialog stays a list of links
+   * with no knowledge of how an export URL is spelled.
    */
-  readonly stlTitle = computed(() =>
-    this.bodyIds().length > 1
-      ? 'Every body at its placement — the assembly, not a print bed'
-      : 'The whole model',
-  );
-
-  readonly bodyExportUrls = computed<{ id: string; stl: string }[]>(() => {
+  readonly exportTargets = computed<ExportTarget[]>(() => {
     const id = this.projectId();
+    if (!id) return [];
     const bodies = this.bodyIds();
-    if (!id || bodies.length < 2) return [];
-    return bodies.map((body) => ({ id: body, stl: this.api.exportUrl(id, 'stl', body) }));
+    const formats = (body?: string) => ({
+      stl: this.api.exportUrl(id, 'stl', body),
+      obj: this.api.exportUrl(id, 'obj', body),
+      step: this.api.exportUrl(id, 'step', body),
+    });
+    const whole: ExportTarget = {
+      id: '',
+      label: 'Whole model',
+      note:
+        bodies.length > 1
+          ? 'Every body at its placement — the assembly, not a print bed'
+          : 'The complete part',
+      ...formats(),
+    };
+    // One body is the whole model; offering both would be the same file twice.
+    if (bodies.length < 2) return [whole];
+    return [
+      whole,
+      ...bodies.map((body) => ({
+        id: body,
+        label: body,
+        note: 'This body alone, moved to the origin for the print bed',
+        ...formats(body),
+      })),
+    ];
   });
 
   /**
@@ -548,6 +565,45 @@ export class ProjectStore {
     await this.open(id);
   }
 
+  /**
+   * Delete a project, then land somewhere sensible.
+   *
+   * Deleting what is on screen leaves nothing selected, so the next project in
+   * the list is opened — or the workspace cleared when that was the last one.
+   * Doing nothing would leave the viewport showing a model whose document no
+   * longer exists, and every subsequent action failing against a dead id.
+   */
+  async deleteProject(id: string): Promise<boolean> {
+    try {
+      await this.api.deleteProject(id);
+    } catch {
+      this.notify(`Could not delete '${id}'`, true);
+      return false;
+    }
+    const remaining = await this.refreshProjects();
+    if (this.projectId() === id) {
+      const next = remaining[0];
+      if (next) {
+        await this.open(next.id);
+      } else {
+        this.projectId.set(null);
+        this.document.set(null);
+        this.build.set(null);
+        this.mesh.set(null);
+        this.bodyMeshes.set([]);
+        this.topologies.set([]);
+        this.sketchGeometry.set(null);
+        this.selectedTags.set([]);
+        this.selectedFeature.set(null);
+        this.pickedPoint.set(null);
+        this.activeBodyChoice.set(null);
+        this.hiddenBodies.set(new Set<string>());
+      }
+    }
+    this.notify(`Deleted '${id}'`, false);
+    return true;
+  }
+
   // -- selection ----------------------------------------------------------
 
   toggleSketches(): void {
@@ -742,6 +798,17 @@ function describe(error: unknown): string {
 
 /** How a click combines with what is already selected. */
 export type SelectMode = 'replace' | 'toggle' | 'range';
+
+/** One row of the mesh export dialog: the whole model, or a single body. */
+export interface ExportTarget {
+  /** The body id, or '' for the whole model. */
+  readonly id: string;
+  readonly label: string;
+  readonly note: string;
+  readonly stl: string;
+  readonly obj: string;
+  readonly step: string;
+}
 
 /** The feature that produced a tag: everything before the first slash. */
 function rootOf(tag: string): string {

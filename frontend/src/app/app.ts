@@ -10,6 +10,7 @@ import {
   ChangeDetectionStrategy,
   Component,
   HostListener,
+  computed,
   inject,
   signal,
   viewChild,
@@ -34,6 +35,9 @@ import {
   NewProjectComponent,
   SketchHereComponent,
   SelectorConsoleComponent,
+  ExportComponent,
+  SheetComponent,
+  ConfirmComponent,
 } from './dialogs/components/dialogs.component';
 import type { FeaturePrefill } from './dialogs/components/dialogs.component';
 import type { FeatureRow } from './core/models/cad.models';
@@ -48,7 +52,10 @@ type Dialog =
   | 'project'
   | 'parameter'
   | 'geometry'
-  | 'sketch';
+  | 'sketch'
+  | 'export'
+  | 'sheet'
+  | 'delete-project';
 
 @Component({
   selector: 'app-root',
@@ -69,6 +76,9 @@ type Dialog =
     NewProjectComponent,
     SketchHereComponent,
     CutSettingsComponent,
+    ExportComponent,
+    SheetComponent,
+    ConfirmComponent,
   ],
   template: `
     <div class="app">
@@ -89,14 +99,18 @@ type Dialog =
         </select>
 
         <button (click)="dialog.set('project')">New</button>
+        <button
+          title="Delete this project and everything in it"
+          [disabled]="!store.projectId()"
+          (click)="dialog.set('delete-project')"
+        >
+          ×
+        </button>
         <button [disabled]="!store.projectId()" (click)="dialog.set('feature')">
           Add feature <span class="badge">A</span>
         </button>
         <button [disabled]="!store.projectId()" (click)="dialog.set('geometry')">
           Sketches <span class="badge">S</span>
-        </button>
-        <button [disabled]="!store.projectId()" (click)="dialog.set('selector')">
-          Selectors <span class="badge">⌘K</span>
         </button>
         <button [disabled]="!store.projectId()" (click)="dialog.set('document')">
           Source <span class="badge">E</span>
@@ -111,33 +125,18 @@ type Dialog =
           <span class="badge">kernel: {{ kernel.name }}</span>
         }
         @if (store.exportUrls(); as urls) {
-          <a [href]="urls.stl" download
-            ><button [title]="store.stlTitle()">STL</button></a
-          >
-          @for (body of store.bodyExportUrls(); track body.id) {
-            <a [href]="body.stl" download
-              ><button [title]="'Just the ' + body.id + ' body, for the print bed'">
-                {{ body.id }}
-              </button></a
-            >
-          }
-          <a [href]="urls.csv" download
-            ><button title="Export the parameter table as CSV">Sheet</button></a
-          >
           <button
-            title="Replace the parameter table from a CSV — edit it in Excel or Calc and bring it back"
-            (click)="sheetInput.click()"
+            title="STL, OBJ or STEP — whole model or one body"
+            (click)="dialog.set('export')"
           >
-            Import
+            Export
           </button>
-          <input
-            #sheetInput
-            type="file"
-            accept=".csv,text/csv"
-            hidden
-            (change)="importSheet($event)"
-          />
-          <a [href]="urls.yaml" download><button>YAML</button></a>
+          <button
+            title="The parameter table out to CSV and back, and the whole document as YAML"
+            (click)="dialog.set('sheet')"
+          >
+            Sheet
+          </button>
         }
         @if (store.drawingUrls(); as urls) {
           <a [href]="urls.views" download
@@ -314,6 +313,19 @@ type Dialog =
               (closed)="dialog.set('none')"
             />
           }
+          @case ('export') {
+            <cad-export [targets]="store.exportTargets()" (closed)="dialog.set('none')" />
+          }
+          @case ('sheet') {
+            @if (store.exportUrls(); as urls) {
+              <cad-sheet
+                [csvUrl]="urls.csv"
+                [yamlUrl]="urls.yaml"
+                (imported)="importSheet($event)"
+                (closed)="dialog.set('none')"
+              />
+            }
+          }
           @case ('cut') {
             <cad-cut-settings
               [projectId]="id"
@@ -377,6 +389,14 @@ type Dialog =
       }
       @if (dialog() === 'project') {
         <cad-new-project (closed)="dialog.set('none')" (created)="create($event)" />
+      }
+      @if (dialog() === 'delete-project') {
+        <cad-confirm
+          title="Delete project"
+          [message]="deleteMessage()"
+          (confirmed)="confirmDeleteProject()"
+          (closed)="dialog.set('none')"
+        />
       }
 
       @if (store.toast(); as toast) {
@@ -467,19 +487,32 @@ export class App {
     }
   }
 
+  /** The sheet dialog has already read the file; this only sends it. */
+  async importSheet(csv: string): Promise<void> {
+    if (await this.store.importSheet(csv)) this.dialog.set('none');
+  }
+
   /**
-   * Read a CSV off disk and hand it to the store.
+   * What the delete confirmation asks, by name rather than by id.
    *
-   * The input is cleared afterwards so choosing the same file twice fires
-   * again — a person who fixes a rejected row and re-picks the same file would
-   * otherwise get silence.
+   * The dropdown shows names, so the question has to use the same word — being
+   * asked about 'a3f' when the screen says 'Bracket' is how the wrong thing
+   * gets deleted.
    */
-  async importSheet(event: Event): Promise<void> {
-    const input = event.target as HTMLInputElement;
-    const file = input.files?.[0];
-    input.value = '';
-    if (!file) return;
-    await this.store.importSheet(await file.text());
+  readonly deleteMessage = computed(() => {
+    const id = this.store.projectId();
+    const name = this.store.projects().find((project) => project.id === id)?.name ?? id;
+    return `Delete '${name}' and every document in it? This cannot be undone.`;
+  });
+
+  /**
+   * A project is the only copy of the documents in it, so deleting one asks
+   * first — the button sits next to 'New' and is otherwise one mis-aim away.
+   */
+  async confirmDeleteProject(): Promise<void> {
+    const id = this.store.projectId();
+    this.dialog.set('none');
+    if (id) await this.store.deleteProject(id);
   }
 
   async addBody(): Promise<void> {

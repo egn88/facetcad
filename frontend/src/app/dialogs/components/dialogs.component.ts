@@ -17,6 +17,7 @@ import {
 } from '@angular/core';
 
 import { CadApiService } from '../../core/services/cad-api.service';
+import type { ExportTarget } from '../../core/services/project-store';
 import { STARTER_DOCUMENT } from '../../core/models/starter-document';
 import type {
   DatumHit,
@@ -1598,4 +1599,193 @@ export class CutSettingsComponent {
         .join(';'),
     });
   }
+}
+
+// ---------------------------------------------------------------------- mesh
+
+/**
+ * Which body to export, and in what format.
+ *
+ * Previously the toolbar grew one download button per body, so a four-body
+ * document pushed everything else off the bar. The choice belongs behind the
+ * one button that provokes it.
+ */
+@Component({
+  selector: 'cad-export',
+  standalone: true,
+  imports: [ModalComponent],
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  template: `
+    <cad-modal title="Export geometry" (closed)="closed.emit()">
+      @if (targets().length === 0) {
+        <div class="empty">Nothing to export yet.</div>
+      }
+      @for (target of targets(); track target.id) {
+        <div class="export-row">
+          <div class="export-name">
+            <strong>{{ target.label }}</strong>
+            <span class="type">{{ target.note }}</span>
+          </div>
+          <span class="spacer"></span>
+          <a [href]="target.stl" download
+            ><button title="Triangle mesh, for a slicer">STL</button></a
+          >
+          <a [href]="target.obj" download
+            ><button title="Triangle mesh with face groups">OBJ</button></a
+          >
+          <a [href]="target.step" download
+            ><button title="Exact surfaces, for other CAD">STEP</button></a
+          >
+        </div>
+      }
+      <button footer (click)="closed.emit()">Close</button>
+    </cad-modal>
+  `,
+  styles: [
+    `
+      .export-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 0;
+        border-bottom: 1px solid var(--border);
+      }
+      .export-row:last-of-type { border-bottom: none; }
+      .export-name { display: flex; flex-direction: column; gap: 2px; }
+      .export-row .spacer { flex: 1; }
+    `,
+  ],
+})
+export class ExportComponent {
+  readonly targets = input.required<readonly ExportTarget[]>();
+  readonly closed = output<void>();
+}
+
+// --------------------------------------------------------------------- sheet
+
+/**
+ * The parameter table, out and back in.
+ *
+ * Export and import were two toolbar buttons that only made sense next to each
+ * other — the round trip is one workflow (edit in a spreadsheet, bring it
+ * back), so it reads better as one door with both directions behind it.
+ */
+@Component({
+  selector: 'cad-sheet',
+  standalone: true,
+  imports: [ModalComponent],
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  template: `
+    <cad-modal title="Parameter sheet" (closed)="closed.emit()">
+      <div class="export-row">
+        <div class="export-name">
+          <strong>Export CSV</strong>
+          <span class="type">Every parameter, its expression and its resolved value</span>
+        </div>
+        <span class="spacer"></span>
+        <a [href]="csvUrl()" download><button>Download</button></a>
+      </div>
+
+      <div class="export-row">
+        <div class="export-name">
+          <strong>Import CSV</strong>
+          <span class="type">Replaces the table — edit it in Excel or Calc and bring it back</span>
+        </div>
+        <span class="spacer"></span>
+        <button (click)="file.click()">Choose file…</button>
+        <input
+          #file
+          type="file"
+          accept=".csv,text/csv"
+          hidden
+          (change)="choose($event)"
+        />
+      </div>
+
+      <div class="export-row">
+        <div class="export-name">
+          <strong>Export YAML</strong>
+          <span class="type">The whole document — parameters, sketches and history</span>
+        </div>
+        <span class="spacer"></span>
+        <a [href]="yamlUrl()" download><button>Download</button></a>
+      </div>
+
+      <button footer (click)="closed.emit()">Close</button>
+    </cad-modal>
+  `,
+  styles: [
+    `
+      .export-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 0;
+        border-bottom: 1px solid var(--border);
+      }
+      .export-row:last-of-type { border-bottom: none; }
+      .export-name { display: flex; flex-direction: column; gap: 2px; }
+      .export-row .spacer { flex: 1; }
+    `,
+  ],
+})
+export class SheetComponent {
+  readonly csvUrl = input.required<string>();
+  readonly yamlUrl = input.required<string>();
+  /** The CSV text the operator picked, ready for the store to send. */
+  readonly imported = output<string>();
+  readonly closed = output<void>();
+
+  /**
+   * The input is cleared afterwards so choosing the same file twice fires
+   * again — someone who fixes a rejected row and re-picks it would otherwise
+   * get silence.
+   */
+  async choose(event: Event): Promise<void> {
+    const input = event.target as HTMLInputElement;
+    const chosen = input.files?.[0];
+    input.value = '';
+    if (!chosen) return;
+    this.imported.emit(await chosen.text());
+  }
+}
+
+// ------------------------------------------------------------------- confirm
+
+/**
+ * A yes/no for something that cannot be undone.
+ *
+ * The browser's own `confirm()` would do the job, but it looks nothing like the
+ * rest of the application and blocks the event loop while it is up. This is the
+ * same modal shell as every other dialog, so there is one vocabulary.
+ */
+@Component({
+  selector: 'cad-confirm',
+  standalone: true,
+  imports: [ModalComponent],
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  template: `
+    <cad-modal [title]="title()" (closed)="closed.emit()">
+      <p>{{ message() }}</p>
+      <ng-container footer>
+        <button class="danger" (click)="confirmed.emit()">{{ confirmLabel() }}</button>
+        <button (click)="closed.emit()">Cancel</button>
+      </ng-container>
+    </cad-modal>
+  `,
+  styles: [
+    `
+      .danger {
+        border-color: var(--error);
+        color: var(--error);
+      }
+    `,
+  ],
+})
+export class ConfirmComponent {
+  readonly title = input.required<string>();
+  readonly message = input.required<string>();
+  readonly confirmLabel = input('Delete');
+  readonly confirmed = output<void>();
+  readonly closed = output<void>();
 }
