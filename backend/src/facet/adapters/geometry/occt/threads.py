@@ -13,25 +13,48 @@ boolean. Cutting is transversal and scales linearly.
 **One sweep per half turn.** A single pipe-shell along the whole helix produces
 one lateral face that wraps around itself many times. OCCT accepts it, reports
 it valid, and then silently subtracts nothing from it. Sweeping in short
-segments and cutting against the compound gives every face a simple
-parameterisation, and the boolean behaves.
+segments gives every face a simple parameterisation, and the boolean behaves.
+
+**Sweep one segment, screw it into place.** The segments are all the same solid
+at different stations, because a helix is invariant under its own screw motion.
+Building each one by sweeping a section at its own station is the same geometry
+in principle and a trap in practice: a pipe shell positions the section by where
+it sits relative to the *start of the spine*, so a section left on the +X axis
+while the spine starts half a turn round comes out half a pitch out of place.
+That produced not a thread but pairs of half-turn arcs stacked at one height,
+stepping back twice per turn — with a plausible volume, the right tags and a
+valid solid to show for it, which is why it survived every test here for so
+long. Sweeping once at turn zero, where section and spine meet by construction,
+and moving rigid copies along the axis cannot get that wrong.
+
+**The segments are welded before they cut.** Left as a compound they abut on
+shared section faces, and the cut leaves every one of those behind in the result
+as a coincident pair — a membrane across the groove every half turn, which is
+both wrong geometry and two faces the naming engine cannot order. Fusing first
+dissolves those junctions while the shape is still a tool. Glued rather than
+intersected, because the segments only ever touch and never overlap: that is a
+promise OCCT can use, and it turns a 12s fuse into a 4s one.
+
+Overlapping the segments instead would seem the simpler cure for the same
+membranes, and is not one. A tool whose own solids interpenetrate is the case
+where the cut reports success and subtracts nothing at all.
 
 **The tool overlaps the material.** The cutting profile reaches past the surface
 it is cutting into, so no face of the tool is ever coincident with a face of the
 part. Coincident faces are the other reliable way to make a boolean lie.
 
-Measured on this machine: an M6 x 12 thread costs about 0.1s to sweep and 3s to
-cut, scaling linearly with length. That is slow enough to matter, which is why
-threads are cached per feature like everything else and why the modelled form
-is opt-in.
+Measured on this machine: an M12 x 14 thread costs about 0.1s to sweep, 4s to
+weld and 2s to cut, scaling linearly with length. That is slow enough to matter,
+which is why threads are cached per feature like everything else and why the
+modelled form is opt-in.
 """
 
 from __future__ import annotations
 
 import math
 
-from OCP.BRep import BRep_Builder
-from OCP.BRepAlgoAPI import BRepAlgoAPI_Common, BRepAlgoAPI_Cut
+from OCP.BOPAlgo import BOPAlgo_GlueEnum
+from OCP.BRepAlgoAPI import BRepAlgoAPI_Common, BRepAlgoAPI_Cut, BRepAlgoAPI_Fuse
 from OCP.BRepBuilderAPI import (
     BRepBuilderAPI_Copy,
     BRepBuilderAPI_MakeEdge,
@@ -45,10 +68,21 @@ from OCP.BRepOffsetAPI import BRepOffsetAPI_MakePipeShell
 from OCP.BRepPrimAPI import BRepPrimAPI_MakeCylinder
 from OCP.Geom import Geom_CylindricalSurface
 from OCP.Geom2d import Geom2d_Line
-from OCP.gp import gp_Ax2, gp_Ax3, gp_Dir, gp_Dir2d, gp_Pnt, gp_Pnt2d, gp_Trsf
+from OCP.gp import (
+    gp_Ax1,
+    gp_Ax2,
+    gp_Ax3,
+    gp_Dir,
+    gp_Dir2d,
+    gp_Pnt,
+    gp_Pnt2d,
+    gp_Trsf,
+    gp_Vec,
+)
 from OCP.TopAbs import TopAbs_WIRE
 from OCP.TopExp import TopExp_Explorer
-from OCP.TopoDS import TopoDS, TopoDS_Compound, TopoDS_Shape
+from OCP.TopoDS import TopoDS, TopoDS_Shape
+from OCP.TopTools import TopTools_ListOfShape
 
 from facet.adapters.geometry.occt.booleans import boolean
 from facet.application.ports.geometry import ThreadRequest
@@ -151,27 +185,52 @@ def _build_tool(request: ThreadRequest) -> TopoDS_Shape:
     else:
         outer, inner = major_r + OVERLAP, minor_r
 
-    builder = BRep_Builder()
-    compound = TopoDS_Compound()
-    builder.MakeCompound(compound)
-
-    turns = request.length / request.pitch + 2 * RUNOUT_TURNS
-    segments = math.ceil(turns / SEGMENT_TURNS)
-    made = 0
-    for index in range(segments):
-        start = -RUNOUT_TURNS + index * SEGMENT_TURNS
-        spine = _helix(mid_r, request.pitch, start, SEGMENT_TURNS, request.right_handed)
-        section = _vee(outer, inner, request.pitch, start * request.pitch)
-        piece = _sweep(spine, section)
-        if piece is not None:
-            builder.Add(compound, piece)
-            made += 1
-
-    if made == 0:
+    segment = _sweep(
+        _helix(mid_r, request.pitch, SEGMENT_TURNS, request.right_handed),
+        _vee(outer, inner, request.pitch),
+    )
+    if segment is None:
         raise FeatureBuildError(
             feature=request.feature, reason="the thread form could not be swept"
         )
-    return _clipped(compound, request, outer)
+
+    turns = request.length / request.pitch + 2 * RUNOUT_TURNS
+    segments = math.ceil(turns / SEGMENT_TURNS)
+    pieces = [
+        _screwed(
+            segment,
+            -RUNOUT_TURNS + index * SEGMENT_TURNS,
+            request.pitch,
+            request.right_handed,
+        )
+        for index in range(segments)
+    ]
+    return _clipped(_welded(pieces, request), request, outer)
+
+
+def _welded(pieces: list[TopoDS_Shape], request: ThreadRequest) -> TopoDS_Shape:
+    """Fuse the swept segments into one solid, dissolving the joins between them."""
+    if len(pieces) == 1:
+        return pieces[0]
+    arguments = TopTools_ListOfShape()
+    arguments.Append(pieces[0])
+    tools = TopTools_ListOfShape()
+    for piece in pieces[1:]:
+        tools.Append(piece)
+    fuse = BRepAlgoAPI_Fuse()
+    fuse.SetArguments(arguments)
+    fuse.SetTools(tools)
+    # The segments meet on shared faces and nowhere else, which is precisely
+    # what glueing asserts. Without it OCCT looks for intersections that are not
+    # there, at three times the cost.
+    fuse.SetGlue(BOPAlgo_GlueEnum.BOPAlgo_GlueShift)
+    fuse.SetRunParallel(True)
+    fuse.Build()
+    if not fuse.IsDone():
+        raise FeatureBuildError(
+            feature=request.feature, reason="the thread form could not be joined up"
+        )
+    return fuse.Shape()
 
 
 def _clipped(tool: TopoDS_Shape, request: ThreadRequest, outer: float) -> TopoDS_Shape:
@@ -236,12 +295,15 @@ def _axis_frame(request: ThreadRequest) -> Frame:
     return Frame.from_origin_normal(request.origin, request.direction * (1.0 / length))
 
 
-def _helix(radius: float, pitch: float, start_turn: float, turns: float, right: bool):
-    """A helical edge on a cylinder about +Z, built in the thread's own frame.
+def _helix(radius: float, pitch: float, turns: float, right: bool):
+    """A helical edge on a cylinder about +Z, from the +X axis at ``z = 0``.
 
     On a cylinder the surface parameters are (angle, height), so a straight 2D
     line of slope ``pitch / 2pi`` is exactly a helix — no approximation, and no
     point sampling to go stale.
+
+    It always starts on +X, where :func:`_vee` puts the section. Starting a spine
+    anywhere else is what a pipe shell mistakes for an offset section.
     """
     surface = Geom_CylindricalSurface(gp_Ax3(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), radius)
     slope = pitch / (2.0 * math.pi)
@@ -250,21 +312,38 @@ def _helix(radius: float, pitch: float, start_turn: float, turns: float, right: 
     # The 2D line is parameterised by arc length in (u, v), so a turn is longer
     # than 2pi by the pitch's contribution.
     unit = 2.0 * math.pi * math.sqrt(1.0 + slope * slope)
-    edge = BRepBuilderAPI_MakeEdge(
-        line, surface, start_turn * unit, (start_turn + turns) * unit
-    ).Edge()
+    edge = BRepBuilderAPI_MakeEdge(line, surface, 0.0, turns * unit).Edge()
     BRepLib.BuildCurves3d_s(edge)
     return BRepBuilderAPI_MakeWire(edge).Wire()
 
 
-def _vee(outer: float, inner: float, pitch: float, height: float):
-    """The triangular thread section, in the plane containing the axis."""
+def _vee(outer: float, inner: float, pitch: float):
+    """The triangular thread section, in the plane containing the axis.
+
+    On +X at ``z = 0``, which is where :func:`_helix` begins.
+    """
     polygon = BRepBuilderAPI_MakePolygon()
-    polygon.Add(gp_Pnt(outer, 0.0, height - pitch / 2.0))
-    polygon.Add(gp_Pnt(inner, 0.0, height))
-    polygon.Add(gp_Pnt(outer, 0.0, height + pitch / 2.0))
+    polygon.Add(gp_Pnt(outer, 0.0, -pitch / 2.0))
+    polygon.Add(gp_Pnt(inner, 0.0, 0.0))
+    polygon.Add(gp_Pnt(outer, 0.0, pitch / 2.0))
     polygon.Close()
     return BRepBuilderAPI_MakeFace(polygon.Wire()).Face()
+
+
+def _screwed(shape: TopoDS_Shape, turns: float, pitch: float, right: bool) -> TopoDS_Shape:
+    """``shape`` advanced ``turns`` along the helix it was built on.
+
+    Rotation and rise together, in the proportion the pitch fixes: the motion the
+    helix is invariant under, so a segment stays a segment of the same thread.
+    """
+    sense = 1.0 if right else -1.0
+    rotation = gp_Trsf()
+    rotation.SetRotation(
+        gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), sense * 2.0 * math.pi * turns
+    )
+    rise = gp_Trsf()
+    rise.SetTranslation(gp_Vec(0.0, 0.0, turns * pitch))
+    return BRepBuilderAPI_Transform(shape, rise.Multiplied(rotation), True).Shape()
 
 
 def _sweep(spine, section) -> TopoDS_Shape | None:

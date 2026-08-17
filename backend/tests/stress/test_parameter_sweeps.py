@@ -215,18 +215,24 @@ def test_a_zero_dimension_fails_loudly(
 
 
 def _without_thread(result: RecomputeResult) -> list[str]:
-    """Every name that is not the thread's, ordinals stripped.
+    """Every name the threaded feature did not make, ordinals stripped.
 
     Stripped rather than kept, so a wall that split into a different number of
     fragments shows up as a changed *count* of the same name — which is the
     shape the failure actually took.
+
+    The whole ``m8`` feature is excluded, not only its flanks. A helix that runs
+    all the way round cuts the bore wall into a spiral, and the spiral is one
+    face per turn — so ``m8/wall[bores.tap]`` counts turns just as honestly as
+    the flanks do, and for the same reason. It was constant here only while the
+    groove was not reaching round.
     """
     return sorted(
         str(face.tag).split("#")[0]
         for body in result.bodies
         if body.solid is not None
         for face in body.solid.topology.faces
-        if not str(face.tag).startswith("m8/thread")
+        if not str(face.tag).startswith("m8/")
     )
 
 

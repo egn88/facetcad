@@ -11,6 +11,7 @@ the whole naming scheme would be worth nothing.
 from __future__ import annotations
 
 import copy
+import math
 
 import pytest
 
@@ -172,6 +173,65 @@ def test_a_short_thread_is_refused_with_the_minimum(kernel: OcctKernel) -> None:
     result = build(kernel, {**TAPPED, "modelled": True, "depth": 2.0})
     assert not result.ok
     assert "too short" in str(result.failures()[0].error)
+
+
+def _thread_profile(kernel: OcctKernel, result, pitch: float, bins: int = 24) -> list[float]:
+    """The cut form, as depth against position along one pitch.
+
+    Every point of a single-start thread lies at a phase
+
+        (z - pitch * theta / 2pi) mod pitch
+
+    that says where across the form it sits and nothing else. So binning the
+    threaded surface by phase and taking the deepest radius in each bin recovers
+    the thread's profile, whatever its diameter, length or handedness.
+    """
+    solid = result.bodies[0].solid
+    threaded = {ref for ref, tag in solid.refs.items() if str(tag).startswith("m6/thread")}
+    mesh = kernel.tessellate(solid.handle, 0.05)
+    spans = [r for r in mesh.face_ranges if r.ref in threaded]
+    centre_x, centre_y = 30.0, 20.0  # the bore, at w / 2, h / 2
+
+    profile = [0.0] * bins
+    for span in spans:
+        for index in mesh.indices[span.start : span.start + span.count]:
+            x = mesh.positions[index * 3] - centre_x
+            y = mesh.positions[index * 3 + 1] - centre_y
+            z = mesh.positions[index * 3 + 2]
+            radius = math.hypot(x, y)
+            phase = (z - pitch * math.atan2(y, x) / (2 * math.pi)) % pitch
+            slot = min(int(phase / pitch * bins), bins - 1)
+            profile[slot] = max(profile[slot], radius)
+    return profile
+
+
+def test_the_thread_is_one_continuous_helix(kernel: OcctKernel, modelled) -> None:
+    """The groove advances one pitch per turn, not half a pitch per half turn.
+
+    A tool swept in half-turn segments will build each segment happily and place
+    it wrongly, and the result still passes every test above: the volume is
+    plausible, the tags are right, nothing unrelated moves. What it is not is a
+    thread — the form repeats twice per pitch with a step between the halves, so
+    no fastener will ever enter it.
+
+    The profile of a single-start thread cannot equal itself half a pitch along;
+    that is what "single-start" means. Doubled-up segments make it equal itself
+    almost exactly, so comparing the profile against its own half-pitch shift
+    separates the two by a wide margin rather than a tolerance.
+    """
+    pitch = standards.thread("M6").pitch
+    profile = _thread_profile(kernel, modelled, pitch)
+    assert max(profile) > 0.0, "no threaded surface was tessellated"
+
+    half = len(profile) // 2
+    shifted = profile[half:] + profile[:half]
+    mismatch = max(abs(a - b) for a, b in zip(profile, shifted, strict=True))
+    depth = max(profile) - min(p for p in profile if p > 0.0)
+    assert mismatch > depth / 2, (
+        f"the thread form repeats every half pitch (worst difference {mismatch:.4f}mm "
+        f"against a form {depth:.4f}mm deep) — the swept segments are stacked on "
+        "top of each other instead of advancing along the helix"
+    )
 
 
 def test_a_left_hand_thread_differs_from_a_right_hand_one(kernel: OcctKernel) -> None:
