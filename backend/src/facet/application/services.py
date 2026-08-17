@@ -98,6 +98,16 @@ class ProjectService:
         self._tolerance = tessellation_tolerance
         self._engines: dict[str, RecomputeEngine] = {}
 
+    def invalidate_caches(self) -> None:
+        """Forget every cached rebuild.
+
+        Called when the geometry worker is replaced: the caches hold handles to
+        solids that lived in its memory, and the replacement numbers its solids
+        from the start again. Keeping them would mean handing back a handle that
+        now names a different shape.
+        """
+        self._engines.clear()
+
     # -- kernel introspection ---------------------------------------------
 
     def kernel_info(self) -> KernelInfo:

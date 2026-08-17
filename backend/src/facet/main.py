@@ -50,17 +50,37 @@ def build_kernel() -> GeometryKernel:
     Prefers OCCT when the optional extra is installed, and falls back to the
     analytic kernel otherwise so the stack is runnable without a heavy
     dependency. ``FACET_KERNEL`` forces a choice.
+
+    OCCT is isolated in a child process by default. A call into OpenCascade
+    holds the interpreter lock for its whole duration — measured here, a fine
+    mesh over a boolean ran 12.87s and let another thread run three times out of
+    a possible ~1,280, with a signal handler not firing until it returned. So
+    nothing in this process can interrupt one, and a pathological input takes
+    the server with it. In a child it can simply be killed.
+
+    ``FACET_GEOMETRY_ISOLATION=off`` turns that off, which costs the protection
+    and saves 5-8% on a rebuild. Worth it only for a benchmark.
     """
     requested = os.environ.get("FACET_KERNEL", "auto").lower()
+    isolate = os.environ.get("FACET_GEOMETRY_ISOLATION", "on").lower() not in (
+        "off",
+        "0",
+        "false",
+        "no",
+    )
 
     if requested in ("auto", "occt"):
         try:
             from facet.adapters.geometry.occt import OcctKernel
-
-            return OcctKernel()
         except ImportError:
             if requested == "occt":
                 raise
+        else:
+            if not isolate:
+                return OcctKernel()
+            from facet.adapters.geometry.guarded import GuardedKernel
+
+            return GuardedKernel("occt")
     from facet.adapters.geometry.fake import FakeKernel
 
     return FakeKernel()
@@ -68,7 +88,15 @@ def build_kernel() -> GeometryKernel:
 
 def build_service() -> ProjectService:
     root = Path(os.environ.get("FACET_DATA", "./data/projects"))
-    return ProjectService(FilesystemDocumentRepository(root), build_kernel())
+    kernel = build_kernel()
+    service = ProjectService(FilesystemDocumentRepository(root), kernel)
+    # When a wedged worker is killed, every cached solid handle refers to memory
+    # that no longer exists — and the replacement reuses the same ids for
+    # different shapes, so a stale cache would be worse than a slow one.
+    set_hook = getattr(kernel, "set_on_restart", None)
+    if set_hook is not None:
+        set_hook(service.invalidate_caches)
+    return service
 
 
 def create_app(service: ProjectService | None = None) -> FastAPI:

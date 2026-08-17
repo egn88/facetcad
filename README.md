@@ -424,17 +424,27 @@ agent guide at `/api/mcp`.
 Not there: revolve, mirror and patterns; assembly as a joint tree with parameter-driven
 kinematics — never a mate solver, which would reintroduce exactly the nondeterminism this
 project exists to escape; dimensions and annotations on drawings; sheet metal. Geometry
-also runs in-process, which is the sharpest edge here. OpenCascade is a C++ library
-reached through Python bindings, and a long call holds the interpreter lock: while it
-runs, nothing else in that process gets a turn, including `/api/health`. Pathological
-input can therefore wedge the whole server, and it has — once, in testing, needing a
-manual restart. Docker will not save you from it either, because `restart:` reacts to a
-process *exiting*, not to a health check failing, so a container that is alive but
-answering nothing is left alone indefinitely.
+runs in a child process, which is not an optimisation — it is the only way to put a time
+limit on it.
 
-Until geometry runs somewhere it can be given a deadline and killed, treat a deployment
-as needing a supervisor that restarts on unhealthy rather than on exit. Isolating the
-kernel in a worker pool is the actual fix and is not done.
+OpenCascade is a C++ library reached through Python bindings, and a call into it holds
+the interpreter lock for its whole duration. Measured here: a fine mesh over a boolean
+ran for 12.87 seconds and let another thread run **three** times, against the ~1,280
+turns it should have had; a `SIGALRM` set at 0.3s did not fire until the call returned.
+So a thread timeout cannot interrupt one, `asyncio.wait_for` cannot, and a signal handler
+— being Python that only runs between bytecodes — cannot either. A pathological input
+wedges the whole server, and once did, needing a manual restart.
+
+A process can be killed, so the kernel lives in one. Every call has a deadline
+(`FACET_GEOMETRY_TIMEOUT`, 60s); on expiry the worker is killed and replaced, the request
+answers `503`, and the API — including `/api/health` — never stops responding. Handles
+carry the generation that issued them, so a solid from a dead worker is refused rather
+than confused with the identically-numbered solid in its replacement. It costs 5–8% on a
+rebuild. `FACET_GEOMETRY_ISOLATION=off` gets that back and gives up the protection.
+
+Worth knowing regardless: Docker's `restart:` reacts to a process *exiting*, not to a
+health check failing, so a container that is alive and answering nothing is left alone
+indefinitely. A deployment still wants a supervisor that restarts on unhealthy.
 
 Countersinks need a cone, which the geometry port has no operation for yet — that is the
 one piece of the hole feature deliberately left out rather than approximated.

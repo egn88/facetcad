@@ -164,6 +164,18 @@ class DocumentPayload(BaseModel):
 
 
 def _fail(error: Exception) -> HTTPException:
+    # Imported here: the guarded kernel is optional, and the API must still
+    # start when geometry runs in-process.
+    from facet.adapters.geometry.guarded import KernelRestarted, KernelTimeout
+
+    if isinstance(error, KernelTimeout):
+        # 503 rather than 500: the server is fine and the request may well
+        # succeed on a simpler model, which is what Retry-After-less 503 means.
+        return HTTPException(status_code=503, detail={"message": str(error)})
+    if isinstance(error, KernelRestarted):
+        # 409: the state the request was written against is gone. Repeating it
+        # verbatim works, because a rebuild starts from the document.
+        return HTTPException(status_code=409, detail={"message": str(error)})
     if isinstance(error, ProjectNotFound):
         return HTTPException(status_code=404, detail={"message": str(error)})
     if isinstance(error, ProjectExists):
