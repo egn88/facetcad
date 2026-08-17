@@ -380,3 +380,72 @@ def test_warming_is_declined_without_a_snapshot_store(
 
     monkeypatch.delenv("FACET_WARM", raising=False)
     assert isinstance(main._build_warmer(repository, None), NoWarming)
+
+
+# --------------------------------------------------------------------------
+# And it does not spend a second kernel on work that is already done
+# --------------------------------------------------------------------------
+
+
+class CountingWarmer:
+    """Records what was asked of it, and does nothing."""
+
+    def __init__(self) -> None:
+        self.scheduled: list[str] = []
+
+    def schedule(self, project_id: str) -> None:
+        self.scheduled.append(project_id)
+
+    def close(self) -> None:
+        return
+
+
+def test_reading_a_warm_project_schedules_nothing(
+    repository: FilesystemDocumentRepository, store: FilesystemSnapshotStore
+) -> None:
+    """The read path used to spawn a second OpenCascade process every time.
+
+    On a two-core server that competes with the request the caller is waiting
+    on, to rebuild geometry that is already sitting in the store.
+    """
+    counter = CountingWarmer()
+    service = ProjectService(
+        repository, FakeKernel(), snapshots=store, warmer=counter
+    )
+
+    service.view_state("bracket")           # cold: there is something to warm
+    assert counter.scheduled == ["bracket"]
+
+    service.recompute_for_export("bracket")  # which this stands in for
+    counter.scheduled.clear()
+
+    service.view_state("bracket")
+    service.view_state("bracket")
+    assert counter.scheduled == []
+
+
+def test_an_edit_still_schedules_a_warm(
+    repository: FilesystemDocumentRepository, store: FilesystemSnapshotStore
+) -> None:
+    """The half that matters: new geometry is still prepared out of band."""
+    counter = CountingWarmer()
+    service = ProjectService(
+        repository, FakeKernel(), snapshots=store, warmer=counter
+    )
+    service.recompute_for_export("bracket")
+    counter.scheduled.clear()
+
+    service.update_parameters("bracket", {"plate_t": 12.0})
+    assert counter.scheduled == ["bracket"]
+
+
+def test_a_service_without_a_store_always_schedules(
+    repository: FilesystemDocumentRepository
+) -> None:
+    """Nothing can be known to be warm when there is nowhere to keep it."""
+    counter = CountingWarmer()
+    service = ProjectService(repository, FakeKernel(), warmer=counter)
+
+    service.view_state("bracket")
+    service.view_state("bracket")
+    assert counter.scheduled == ["bracket", "bracket"]

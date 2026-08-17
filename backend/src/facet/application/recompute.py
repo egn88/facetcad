@@ -476,6 +476,40 @@ class RecomputeEngine:
             keys.append(upstream)
         return keys
 
+    def stored(self, document: Document, detail: str = Detail.DRAFT) -> bool:
+        """Whether every body's finished state is already in the store.
+
+        Answered without building anything: resolving the parameters and hashing
+        the history is all it takes to know what a rebuild would produce, which
+        is what a content-addressed cache is *for*. The cost is one existence
+        probe per body.
+
+        The caller is whoever is about to spend real money — starting a second
+        OpenCascade process to warm export geometry, most of all. Reading a
+        project scheduled one of those every time, and on a two-core server that
+        second process competes with the request the user is waiting on.
+
+        False when the document cannot even resolve, because then nothing is
+        known rather than nothing is needed.
+        """
+        if self._snapshots is None:
+            return False
+        try:
+            parameters = document.parameters.resolve()
+            frames = document.datums.resolve_all(parameters)
+        except FacetCADError:
+            return False
+
+        for body in document.bodies:
+            keys = self._key_chain(body, document, parameters, frames)
+            final = next((key for key in reversed(keys) if key is not None), None)
+            if final is None:
+                # Nothing to build, so nothing can be missing.
+                continue
+            if not self._snapshots.has(self._snapshot_key(body.id, detail, final)):
+                return False
+        return True
+
     def _snapshot_key(self, body_id: str, detail: str, key: str) -> str:
         blob = f"{SNAPSHOT_FORMAT}/{self._kernel.name}/{detail}/{body_id}/{key}"
         return hashlib.sha256(blob.encode()).hexdigest()

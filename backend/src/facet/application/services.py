@@ -127,12 +127,14 @@ class ProjectService:
         # allowed to be load-bearing.
         self._warmer = warmer
         self._engines: dict[str, RecomputeEngine] = {}
-        # Triangles, keyed by the solid they came from. A mesh is a pure function
-        # of a solid and a tolerance, and a solid that has not been rebuilt keeps
-        # the same handle -- so this is the same content-hash reasoning the
-        # engine uses, one layer up. Worth it because tessellation was 74% of a
-        # warm /state response and 86% with every thread modelled: the rebuild
-        # was cached and the mesh was not.
+        # Triangles, keyed by the state of the body they were cut from. A mesh
+        # is a pure function of a solid, a detail level and a tolerance, so this
+        # is the same content-hash reasoning the engine uses, one layer up.
+        # Worth it because tessellation was 74% of a warm /state response and
+        # 86% with every thread modelled: the rebuild was cached and the mesh
+        # was not. Keyed by kernel *handle* it still was not, since a restore
+        # issues a new one every time -- which is how a cache with a 100% miss
+        # rate went unnoticed.
         self._meshes: dict[str, Tessellation] = {}
 
     def invalidate_caches(self) -> None:
@@ -912,8 +914,9 @@ class ProjectService:
         document = self._repository.load(project_id)
         result = self._engine(project_id).recompute(document)
         # Opening a document and exporting it is as common as editing one and
-        # exporting it, and a warm that is already done costs a restore.
-        self._warm(project_id)
+        # exporting it. Free when the export geometry is already there, which
+        # after the first open it is.
+        self._warm(project_id, document)
         return {
             "document": document.to_dict(),
             # Packed here and nowhere else. /bodies and /mesh keep plain numbers
@@ -981,16 +984,25 @@ class ProjectService:
         document.validate()
         self._repository.save(project_id, document)
         result = self._engine(project_id).recompute(document)
-        self._warm(project_id)
+        self._warm(project_id, document)
         return result
 
-    def _warm(self, project_id: str) -> None:
+    def _warm(self, project_id: str, document: Document | None = None) -> None:
         """Ask for export-detail geometry to be prepared, if anything will.
 
         On the request path, so it must not raise. A warmer that throws here
         would turn a saved edit into a failed one.
+
+        Skipped when the export-detail geometry is already stored. Deciding that
+        costs a hash of the history and a stat per body; not deciding it costs a
+        second OpenCascade process, spawned on every read of every project, on a
+        server with two cores and a request already waiting on the first one.
+        The check is deliberately here rather than inside the warmer, because
+        this is where a live kernel name is already to hand.
         """
         if self._warmer is None:
+            return
+        if document is not None and self._engine(project_id).stored(document, Detail.FULL):
             return
         # Suppressed rather than logged: a warmer is not allowed to matter, and
         # the one that ships already swallows its own failures.
