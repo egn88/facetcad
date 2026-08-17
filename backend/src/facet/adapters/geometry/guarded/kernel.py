@@ -193,6 +193,19 @@ class GuardedKernel:
     def tessellate(self, solid: SolidHandle, tolerance: float = 0.1) -> Tessellation:
         return self._call("tessellate", solid, tolerance)
 
+    def snapshot(self, solid: SolidHandle) -> bytes:
+        return self._call("snapshot", solid)
+
+    def restore(self, blob: bytes) -> SolidResult:
+        """Rebuild a solid inside the worker from stored bytes.
+
+        Tagged like any other result, and with the *current* generation — which
+        is the point of restoring rather than reusing a handle. A snapshot
+        outlives the worker that made it, so it is the one thing here that a
+        restart does not invalidate.
+        """
+        return self._tag(self._call("restore", blob))
+
     def bounding_box(self, solid: SolidHandle) -> BoundingBox:
         return self._call("bounding_box", solid)
 

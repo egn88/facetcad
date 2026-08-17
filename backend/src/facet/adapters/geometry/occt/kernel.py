@@ -28,9 +28,13 @@ that a swept face is a pad "side" but a pocket "wall"; that is decided in
 from __future__ import annotations
 
 import itertools
+import pickle
+import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 
+from OCP.BinTools import BinTools
 from OCP.Bnd import Bnd_Box
 from OCP.BRep import BRep_Tool
 from OCP.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Surface
@@ -98,6 +102,9 @@ from facet.domain.math3d import LINEAR_TOL, Frame, Vec2, Vec3
 _CURVE_MATCH_TOL = 1e-4
 #: Coordinate quantisation for deterministic reference ordering.
 _SORT_DIGITS = 6
+#: Layout of a snapshot blob. Bumped when what goes into one changes shape, so
+#: an older file is refused rather than half-understood.
+_SNAPSHOT_FORMAT = 1
 
 _SURFACE_KINDS = {
     GeomAbs_SurfaceType.GeomAbs_Plane: SurfaceKind.PLANE,
@@ -536,6 +543,7 @@ class OcctKernel:
                 Capability.FACE_PROFILE,
                 Capability.DRAWING_EXPORT,
                 Capability.THREAD,
+                Capability.SNAPSHOT,
             }
         )
 
@@ -1049,11 +1057,153 @@ class OcctKernel:
             )
         return export_drawing(profiles, fmt, title=solid_handle.id)
 
+    # -- snapshots ---------------------------------------------------------
+
+    def snapshot(self, solid_handle: SolidHandle) -> bytes:
+        """Serialise a stored solid, with everything needed to name it again.
+
+        The geometry goes out through ``BinTools`` rather than ``BRepTools``. The
+        ASCII form loses about 1e-12 on a coordinate, and refs here are assigned
+        by sorting on centroid and area — that drift sits far below the sort's
+        own rounding and would almost certainly never reorder anything, but
+        "almost certainly" is the failure mode this project exists to remove. The
+        binary form is exactly equal, half the size and four times faster.
+        Measured on a 403-face body: 857kB, 7ms out, 10ms back, every fingerprint
+        identical to the last bit.
+
+        The refs and their provenance travel alongside, because a B-rep read off
+        a disk has no history: nothing in the file says a face was swept from
+        curve ``c1``. Storing the refs in canonical order rather than recomputing
+        them also means the restore can *check* the ordering it derives instead
+        of assuming it.
+
+        Via a file because OCP's ``BytesIO`` overload does not round-trip — it
+        writes a stream ``Read_s`` rejects with a bad point representation. The
+        same reason ``export_brep`` below uses one.
+        """
+        solid = self._lookup_solid(solid_handle)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "solid.bin"
+            if not BinTools.Write_s(solid.shape, str(path)):
+                raise FeatureBuildError(
+                    feature="<snapshot>", reason="the solid could not be serialised"
+                )
+            geometry = path.read_bytes()
+
+        return pickle.dumps(
+            {
+                "format": _SNAPSHOT_FORMAT,
+                "geometry": geometry,
+                # In the order refs were assigned, which is the order the sort
+                # below has to reproduce.
+                "refs": [ref for ref, _ in solid.faces],
+                "provenance": {ref: solid.provenance.get(ref) for ref, _ in solid.faces},
+                "fingerprints": {ref: solid.fingerprints.get(ref) for ref, _ in solid.faces},
+            },
+            protocol=pickle.HIGHEST_PROTOCOL,
+        )
+
+    def restore(self, blob: bytes) -> SolidResult:
+        """Register a solid from :meth:`snapshot`, with the refs it had.
+
+        No geometry is rebuilt, but the *ordering* is, and then checked against
+        what was stored. If the canonical sort over the restored shape does not
+        reproduce the recorded fingerprints face for face, the names no longer
+        describe this solid and the whole thing is refused — the alternative
+        being a selector that quietly resolves to a different face.
+        """
+        try:
+            state = pickle.loads(blob)
+            geometry = state["geometry"]
+            refs: list[Ref] = list(state["refs"])
+            provenance: dict[Ref, FaceProvenance] = state["provenance"]
+            recorded: dict[Ref, FaceFingerprint] = state["fingerprints"]
+            version = state["format"]
+        except Exception as error:
+            raise FeatureBuildError(
+                feature="<snapshot>", reason=f"the stored solid is unreadable: {error}"
+            ) from error
+
+        if version != _SNAPSHOT_FORMAT:
+            raise FeatureBuildError(
+                feature="<snapshot>",
+                reason=f"stored in format {version!r}, this kernel writes {_SNAPSHOT_FORMAT}",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "solid.bin"
+            path.write_bytes(geometry)
+            shape = TopoDS_Shape()
+            try:
+                BinTools.Read_s(shape, str(path))
+            except Exception as error:  # OCCT raises Standard_Failure subclasses
+                raise FeatureBuildError(
+                    feature="<snapshot>",
+                    reason=f"the stored solid could not be read back: {error}",
+                ) from error
+
+        faces = _faces_of(shape)
+        if len(faces) != len(refs):
+            raise FeatureBuildError(
+                feature="<snapshot>",
+                reason=(
+                    f"the stored solid had {len(refs)} faces and read back with "
+                    f"{len(faces)}"
+                ),
+            )
+
+        ordered = [(face, _face_fingerprint(face)) for face in faces]
+        ordered.sort(key=lambda item: _sort_key(item[1]))
+        for ref, (_, fingerprint) in zip(refs, ordered, strict=True):
+            if recorded.get(ref) != fingerprint:
+                raise FeatureBuildError(
+                    feature="<snapshot>",
+                    reason=(
+                        f"face '{ref}' read back in a different position; the stored "
+                        "names do not describe this solid"
+                    ),
+                )
+
+        return self._adopt(shape, ordered, refs, provenance)
+
+    def _adopt(
+        self,
+        shape: TopoDS_Shape,
+        ordered: list[tuple[TopoDS_Face, FaceFingerprint]],
+        refs: Sequence[Ref],
+        provenance: Mapping[Ref, FaceProvenance],
+    ) -> SolidResult:
+        """Register a verified restored shape under the refs it already had."""
+        self._counter += 1
+        handle = SolidHandle(id=f"s{self._counter}", kernel=self.name)
+        stored = _Solid(handle=handle, shape=shape)
+        self._solids[handle.id] = stored
+
+        unknown = FaceProvenance(origin=Origin.UNKNOWN)
+        records: list[FaceRecord] = []
+        index_of = _ShapeMap()
+        for ref, (face, fingerprint) in zip(refs, ordered, strict=True):
+            origin = provenance.get(ref) or unknown
+            stored.faces.append((ref, face))
+            stored.fingerprints[ref] = fingerprint
+            stored.provenance[ref] = origin
+            index_of.set(face, ref)
+            records.append(
+                FaceRecord(ref=ref, provenance=origin, fingerprint=fingerprint)
+            )
+
+        edge_records = _edge_records(shape, index_of)
+        for record, edge in edge_records:
+            stored.edges[record.ref] = (edge, record.faces)
+
+        return SolidResult(
+            solid=handle,
+            faces=tuple(records),
+            edges=tuple(record for record, _ in edge_records),
+        )
+
     def export_brep(self, solid_handle: SolidHandle, fmt: str) -> bytes:
         """Write STEP — the reason to use a B-rep kernel at all."""
-        import tempfile
-        from pathlib import Path
-
         from OCP.IFSelect import IFSelect_ReturnStatus
         from OCP.Interface import Interface_Static
         from OCP.STEPControl import STEPControl_AsIs, STEPControl_Writer

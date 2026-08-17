@@ -46,6 +46,7 @@ from .ports.geometry import (
     Tessellation,
 )
 from .ports.repository import DocumentRepository, ProjectSummary
+from .ports.snapshots import SnapshotStore
 from .recompute import Detail, RecomputeEngine, RecomputeResult
 
 #: How finely a free-form curve is approximated when flattened for cutting (mm).
@@ -93,10 +94,15 @@ class ProjectService:
         kernel: GeometryKernel,
         *,
         tessellation_tolerance: float = 0.1,
+        snapshots: SnapshotStore | None = None,
     ) -> None:
         self._repository = repository
         self._kernel = kernel
         self._tolerance = tessellation_tolerance
+        # Handed to every engine, so a rebuild of any project can start from
+        # geometry an earlier run left behind. Optional: without it the engines
+        # behave exactly as they did, cold on every start.
+        self._snapshots = snapshots
         self._engines: dict[str, RecomputeEngine] = {}
 
     def invalidate_caches(self) -> None:
@@ -106,6 +112,11 @@ class ProjectService:
         solids that lived in its memory, and the replacement numbers its solids
         from the start again. Keeping them would mean handing back a handle that
         now names a different shape.
+
+        The snapshot store is deliberately left alone. Its entries are bytes, not
+        handles — they never referred to the dead worker's memory, and they are
+        the one thing that makes the recovery cheap instead of another full
+        rebuild.
         """
         self._engines.clear()
 
@@ -775,7 +786,7 @@ class ProjectService:
     def _engine(self, project_id: str) -> RecomputeEngine:
         engine = self._engines.get(project_id)
         if engine is None:
-            engine = RecomputeEngine(self._kernel)
+            engine = RecomputeEngine(self._kernel, self._snapshots)
             self._engines[project_id] = engine
         return engine
 

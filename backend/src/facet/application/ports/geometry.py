@@ -56,6 +56,15 @@ class Capability:
     """Can flatten a planar face into 2D curves — the cut path for CNC."""
     THREAD = "thread"
     """Can cut a helical thread form."""
+    SNAPSHOT = "snapshot"
+    """Can write a solid to bytes and read back one with the *same* face refs.
+
+    The second half is the whole requirement. Any kernel can serialise a shape;
+    what makes a snapshot usable is that restoring it assigns identical refs, so
+    the names stored against them still point at the same geometry. A kernel
+    whose round trip perturbs a centroid enough to reorder the canonical sort
+    must not declare this.
+    """
 
 
 # --------------------------------------------------------------------------
@@ -559,6 +568,38 @@ class ProfileExtractor(Protocol):
         self, solid: SolidHandle, frame: Frame, tolerance: float = 0.01
     ) -> Profile2D:
         """The outline where ``frame``'s plane cuts the solid."""
+        ...
+
+
+@runtime_checkable
+class SolidSnapshots(Protocol):
+    """Puts a built solid somewhere it survives this process, and gets it back.
+
+    Separate from the kernel port for the usual reason: a kernel that cannot do
+    this is still a kernel, and the recompute engine simply rebuilds.
+
+    The contract is about *identity*, not bytes. ``restore`` must return a result
+    whose refs are the ones the original had, because the names the caller stored
+    are keyed on them. That makes the blob opaque and entirely the adapter's
+    business: a shape read off a disk has no history to be asked about, so
+    whatever an adapter needs beyond the geometry — provenance, the ordering it
+    assigned — it has to put in there itself.
+
+    An adapter should verify what it reads rather than trust it, and raise if it
+    cannot. Rebuilding is always correct; a snapshot is only ever an
+    optimisation, and one that cannot prove itself must not be handed back.
+    """
+
+    def snapshot(self, solid: SolidHandle) -> bytes:
+        """Serialise a stored solid, completely. Raises if the handle is unknown."""
+        ...
+
+    def restore(self, blob: bytes) -> SolidResult:
+        """Register a solid from ``snapshot`` output, with its original refs.
+
+        Raises rather than returning something approximate if the blob does not
+        read back as the solid it described.
+        """
         ...
 
 

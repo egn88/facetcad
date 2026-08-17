@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import pickle
 import threading
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
+from facet.domain.body import Body
 from facet.domain.document import Document
 from facet.domain.errors import (
     FacetCADError,
@@ -47,6 +49,7 @@ from .features import (
 )
 from .naming import NamedSolid, NamingEngine
 from .ports.geometry import GeometryKernel
+from .ports.snapshots import SnapshotStore
 
 
 class FeatureStatus:
@@ -196,6 +199,33 @@ class _CacheEntry:
     solid: NamedSolid
 
 
+#: Bumped when the *meaning* of anything inside a snapshot changes — a tag's
+#: spelling, a role name, how refs are ordered — so old entries are ignored
+#: rather than trusted. It goes into the key, so a bump orphans every existing
+#: file and eviction reclaims them.
+#:
+#: This is a manual step and therefore a place to be wrong. What stops that
+#: being silent is `tests/stress/test_kernel_baseline.py`: a change that alters a
+#: name fails there first, which is the prompt to come and bump this.
+SNAPSHOT_FORMAT = 1
+
+
+@dataclass(frozen=True)
+class _Snapshot:
+    """A built body, in a form that outlives the process that built it.
+
+    ``geometry`` is the kernel's own bytes. ``solid`` is the naming state, which
+    is ordinary domain data and pickles as itself — the handle inside it is
+    stale by definition and is replaced on restore.
+    """
+
+    format: int
+    kernel: str
+    key: str
+    geometry: bytes
+    solid: NamedSolid
+
+
 class Detail:
     """How much geometry a rebuild is worth computing.
 
@@ -224,8 +254,17 @@ class RecomputeEngine:
     edit to the last feature rebuilds only that one.
     """
 
-    def __init__(self, kernel: GeometryKernel) -> None:
+    def __init__(
+        self, kernel: GeometryKernel, snapshots: SnapshotStore | None = None
+    ) -> None:
         self._kernel = kernel
+        # Where built geometry goes so the *next* process does not rebuild it.
+        # Optional, and every failure path through it is a miss: the in-memory
+        # cache below is the fast path within a session, and this one exists
+        # because a session starts cold. Measured on a 35-feature document: a
+        # warm rebuild is 2.5ms, a cold one 2.5s, and a restart threw the
+        # difference away.
+        self._snapshots = snapshots
         self._cache: dict[str, _CacheEntry] = {}
         # One rebuild of a project at a time.
         #
@@ -283,7 +322,7 @@ class RecomputeEngine:
 
     def _recompute_body(
         self,
-        body,
+        body: Body,
         document: Document,
         parameters: ResolvedParameters,
         frames: Mapping[str, Frame],
@@ -297,7 +336,23 @@ class RecomputeEngine:
         upstream_key = ""
         halted = False
 
-        for spec in body.features:
+        # The key chain costs no geometry, so it can be worked out for the whole
+        # history up front — which is what lets a snapshot of the *last* feature
+        # be found without building the thirty-four before it. Walking the
+        # features first and looking for the cached one last would never reach
+        # it: the first miss rebuilds, and after that every key still matches
+        # but the work is already done.
+        keys = self._key_chain(body, document, parameters, frames)
+        resumed = self._resume(body, detail, keys, naming, document, frames, outcomes)
+        if resumed is not None:
+            start, current = resumed
+            upstream_key = keys[start] or ""
+        else:
+            start = -1
+
+        for index, spec in enumerate(body.features):
+            if index <= start:
+                continue  # accounted for by the restored snapshot
             if halted:
                 outcomes.append(
                     FeatureOutcome(id=spec.id, type=spec.type, status=FeatureStatus.SKIPPED)
@@ -379,12 +434,180 @@ class RecomputeEngine:
                 )
             )
 
+        self._keep(body, detail, keys, current, outcomes)
         return BodyResult(
             id=body.id,
             solid=current,
             outcomes=tuple(outcomes),
             placement=placement,
         )
+
+    # -- snapshots ---------------------------------------------------------
+
+    def _key_chain(
+        self,
+        body: Body,
+        document: Document,
+        parameters: ResolvedParameters,
+        frames: Mapping[str, Frame],
+    ) -> list[str | None]:
+        """Every feature's cache key, in order, without building anything.
+
+        ``None`` where a feature is suppressed — a suppressed feature does not
+        advance the chain, because the state after it is the state before it.
+        """
+        keys: list[str | None] = []
+        upstream = ""
+        for spec in body.features:
+            if spec.suppressed:
+                keys.append(None)
+                continue
+            upstream = self._cache_key(spec, document, parameters, frames, upstream)
+            keys.append(upstream)
+        return keys
+
+    def _snapshot_key(self, body_id: str, detail: str, key: str) -> str:
+        blob = f"{SNAPSHOT_FORMAT}/{self._kernel.name}/{detail}/{body_id}/{key}"
+        return hashlib.sha256(blob.encode()).hexdigest()
+
+    def _resume(
+        self,
+        body: Body,
+        detail: str,
+        keys: Sequence[str | None],
+        naming: NamingEngine,
+        document: Document,
+        frames: Mapping[str, Frame],
+        outcomes: list[FeatureOutcome],
+    ) -> tuple[int, NamedSolid] | None:
+        """Start from a stored solid, if one matches a state this build reaches.
+
+        Searched from the end backwards, so the longest usable prefix wins: on
+        opening a document that is the whole history, and after appending a
+        feature it is everything but the new one.
+
+        Appends ``outcomes`` for the features the snapshot accounts for. They
+        report ``CACHED`` because nothing was recomputed, and no face count,
+        because no per-feature state exists to count — only the state they add
+        up to.
+        """
+        if self._snapshots is None:
+            return None
+
+        for index in range(len(keys) - 1, -1, -1):
+            key = keys[index]
+            if key is None:
+                continue
+            restored = self._load(body.id, detail, key)
+            if restored is None:
+                continue
+
+            # Frames must be registered for the features that were *not* run.
+            # Split ordering resolves fragments in the owning feature's frame, so
+            # a later feature splitting a face that belongs to a skipped one
+            # would otherwise order its fragments in the world frame and pick
+            # different ordinals than a full rebuild. The same reason a cache hit
+            # re-registers, one prefix at a time instead of one feature.
+            for spec in body.features[: index + 1]:
+                _reregister_frames(naming, document, spec, frames)
+                outcomes.append(
+                    FeatureOutcome(
+                        id=spec.id,
+                        type=spec.type,
+                        status=(
+                            FeatureStatus.SUPPRESSED
+                            if spec.suppressed
+                            else FeatureStatus.CACHED
+                        ),
+                    )
+                )
+            # Seeded so a second rebuild in this process needs no restore at all.
+            self._cache[f"{detail}/{body.id}/{body.features[index].id}"] = _CacheEntry(
+                key=key, solid=restored
+            )
+            return index, restored
+        return None
+
+    def _load(self, body_id: str, detail: str, key: str) -> NamedSolid | None:
+        """A stored solid for this exact state, or None for any reason at all.
+
+        Every failure here is a miss: a missing file, a truncated one, a pickle
+        from an older layout, a kernel that cannot restore, refs that came back
+        different. Rebuilding is always correct, so nothing about a snapshot is
+        worth raising over — and a snapshot that cannot prove itself is exactly
+        the one not to trust.
+        """
+        assert self._snapshots is not None
+        blob = self._snapshots.load(self._snapshot_key(body_id, detail, key))
+        if blob is None:
+            return None
+        try:
+            stored = pickle.loads(blob)
+            if (
+                not isinstance(stored, _Snapshot)
+                or stored.format != SNAPSHOT_FORMAT
+                or stored.kernel != self._kernel.name
+                or stored.key != key
+            ):
+                return None
+            restore = getattr(self._kernel, "restore", None)
+            if restore is None:
+                return None
+            result = restore(stored.geometry)
+        except Exception:
+            return None
+
+        # The names were stored against refs; if the kernel handed back a
+        # different set, they no longer describe this solid and the whole entry
+        # is worthless. Checked rather than assumed, because the failure would be
+        # a selector quietly pointing at the wrong face.
+        if {record.ref for record in result.faces} != set(stored.solid.refs):
+            return None
+        return replace(stored.solid, handle=result.solid)
+
+    def _keep(
+        self,
+        body: Body,
+        detail: str,
+        keys: Sequence[str | None],
+        current: NamedSolid | None,
+        outcomes: Sequence[FeatureOutcome],
+    ) -> None:
+        """Store the finished body, so the next process starts warm.
+
+        Only the final state, and only when every feature is accounted for. A
+        history that stopped early would be stored under the key of a state it
+        never reached.
+        """
+        if self._snapshots is None or current is None:
+            return
+        if any(o.status in (FeatureStatus.FAILED, FeatureStatus.SKIPPED) for o in outcomes):
+            return
+        final = next((key for key in reversed(keys) if key is not None), None)
+        if final is None:
+            return
+
+        take = getattr(self._kernel, "snapshot", None)
+        if take is None:
+            return
+        try:
+            geometry = take(current.handle)
+            blob = pickle.dumps(
+                _Snapshot(
+                    format=SNAPSHOT_FORMAT,
+                    kernel=self._kernel.name,
+                    key=final,
+                    geometry=geometry,
+                    solid=current,
+                ),
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
+        except Exception:
+            # A kernel that cannot serialise this solid, or a solid holding
+            # something that will not pickle. The rebuild already succeeded and
+            # the caller has its answer; the only cost is a cold start later.
+            return
+        self._snapshots.save(self._snapshot_key(body.id, detail, final), blob)
 
     # -- one feature -------------------------------------------------------
 

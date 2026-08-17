@@ -352,7 +352,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) and [DESIGN.md](DESIGN.md).
 ## Tests
 
 ```bash
-cd backend && .venv/bin/python -m pytest        # 855 tests, ~1.5 min with OCCT installed
+cd backend && .venv/bin/python -m pytest        # 975 tests, ~2.5 min with OCCT installed
 cd frontend && npm test                        # 25 tests, chain naming stability
 ```
 
@@ -393,6 +393,33 @@ suite runs without OCCT in seconds, so the port cannot quietly grow OCCT-shaped
 assumptions, and so a misbehaving model can be run against both to answer "is this our
 naming layer or the kernel?" in one command.
 
+### Rebuilds that survive a restart
+
+A rebuild is content-addressed: each feature is keyed on its own spec, the parameters it
+reads, the frame it sits on and the key of the feature before it. Within a session that
+makes editing one dimension rebuild only what depends on it — a 35-feature model
+re-renders in about 2.5ms once warm, against 2.5s cold.
+
+The gap between those two numbers used to be thrown away on every restart, every geometry
+worker replacement, and for every user who was not the one who last touched the document.
+So the finished solid for each body is written out under that same hash: the geometry as
+OpenCascade binary, the names beside it. Opening a known document reads it back instead of
+rebuilding — measured on the 35-feature model, **2.5s to 0.24s** — and appending a feature
+resumes from the stored prefix rather than replaying the history.
+
+Restoring is checked, not trusted. Refs are assigned by sorting faces on their
+fingerprints, so a restore re-derives that ordering from the shape it read and refuses the
+whole entry if it does not reproduce the fingerprints that were recorded — the failure it
+is guarding against being a selector that quietly resolves to a different face. Everything
+else that can go wrong (a truncated file, a blob from an older layout, a store on a
+read-only volume) is a cache miss, because rebuilding is always correct.
+
+`FACET_CACHE` points the store somewhere other than `<FACET_DATA>/../snapshots`, and
+`FACET_CACHE=off` turns it off. The directory is derived data and safe to delete at any
+time; it is kept out of the projects directory so that backing up your models does not
+mean backing up a gigabyte of B-reps. It is capped at 512 MB and evicts least-recently-used
+entries.
+
 The OCCT image is ~850 MB, most of it OpenCascade itself. The build strips the parts of
 `cadquery-ocp` this project never imports — matplotlib, and every VTK library outside
 OCP's own link chain — then proves the result can still cut a fillet and write STEP,
@@ -416,7 +443,8 @@ sketches with lines, arcs and circles, pad and pocket on arbitrary profiles at a
 orientation, counterbored holes and tapped or modelled threads at ISO standard sizes,
 fillet and chamfer through named-edge selectors with `on_failure: skip`, multiple bodies
 with placements, provenance naming with split ordinals, selectors with fail-loud
-diagnostics, incremental recompute with content-hash caching, STL/OBJ/STEP/CSV/YAML
+diagnostics, incremental recompute with content-hash caching that survives a restart,
+STL/OBJ/STEP/CSV/YAML
 export, DXF and SVG for cut paths, orthographic sections, flat and finger-jointed panels
 and laser enclosures, CSV import, a 3D viewport with click-to-tag, an MCP server and the
 agent guide at `/api/mcp`.

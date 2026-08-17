@@ -396,3 +396,109 @@ def test_released_handles_are_rejected(kernel: GeometryKernel, plate) -> None:
     kernel.release(plate.solid)
     with pytest.raises(FeatureBuildError):
         kernel.volume(plate.solid)
+
+
+# --------------------------------------------------------------------------
+# Snapshots — the same solid, in a later process
+# --------------------------------------------------------------------------
+#
+# The contract is about identity rather than bytes: the caller stores names
+# against refs, so a restored solid whose refs came back in a different order
+# would silently point every selector somewhere else. Asserted for both
+# adapters, because they get there very differently — the analytic kernel's
+# faces carry their own refs, and OCCT's have to be re-derived from a canonical
+# sort over a shape read off a disk.
+
+
+def _snapshotting(kernel: GeometryKernel):
+    if Capability.SNAPSHOT not in kernel.capabilities:
+        pytest.skip(f"{kernel.name} does not declare snapshots")
+    return kernel
+
+
+def test_a_snapshot_restores_the_same_refs(kernel: GeometryKernel, plate) -> None:
+    _snapshotting(kernel)
+    restored = kernel.restore(kernel.snapshot(plate.solid))
+
+    assert [r.ref for r in restored.faces] == [r.ref for r in plate.faces]
+
+
+def test_a_restored_solid_keeps_every_provenance(kernel: GeometryKernel, plate) -> None:
+    """Names are rooted in provenance, and a file has no history of its own."""
+    _snapshotting(kernel)
+    restored = kernel.restore(kernel.snapshot(plate.solid))
+
+    before = {r.ref: r.provenance for r in plate.faces}
+    after = {r.ref: r.provenance for r in restored.faces}
+    assert after == before
+    assert all(r.provenance.origin != Origin.UNKNOWN for r in restored.faces)
+
+
+def test_a_restored_solid_keeps_every_fingerprint(kernel: GeometryKernel, plate) -> None:
+    """Exactly, not approximately — refs are ordered by these numbers."""
+    _snapshotting(kernel)
+    restored = kernel.restore(kernel.snapshot(plate.solid))
+
+    assert {r.ref: r.fingerprint for r in restored.faces} == {
+        r.ref: r.fingerprint for r in plate.faces
+    }
+
+
+def test_a_restored_solid_is_a_usable_base(kernel: GeometryKernel, plate) -> None:
+    """The point of restoring: the next feature builds on it as if nothing changed."""
+    _snapshotting(kernel)
+    restored = kernel.restore(kernel.snapshot(plate.solid))
+
+    direct = kernel.pocket(
+        plate.solid,
+        PocketRequest(
+            feature="slot",
+            profile=rectangle("slot", 20.0, 10.0, x0=10.0, y0=10.0, z=PLATE_T),
+            depth=2.0,
+            direction=-1,
+        ),
+    )
+    after = kernel.pocket(
+        restored.solid,
+        PocketRequest(
+            feature="slot",
+            profile=rectangle("slot", 20.0, 10.0, x0=10.0, y0=10.0, z=PLATE_T),
+            depth=2.0,
+            direction=-1,
+        ),
+    )
+    assert [r.ref for r in after.faces] == [r.ref for r in direct.faces]
+    assert {r.ref: r.provenance for r in after.faces} == {
+        r.ref: r.provenance for r in direct.faces
+    }
+
+
+def test_a_restored_solid_has_the_same_volume(kernel: GeometryKernel, plate) -> None:
+    _snapshotting(kernel)
+    restored = kernel.restore(kernel.snapshot(plate.solid))
+
+    assert kernel.volume(restored.solid) == pytest.approx(
+        kernel.volume(plate.solid), rel=1e-12
+    )
+
+
+def test_restoring_rubbish_is_refused_rather_than_guessed(kernel: GeometryKernel) -> None:
+    """A blob that is not a snapshot must raise, never return something plausible."""
+    _snapshotting(kernel)
+    with pytest.raises(FeatureBuildError):
+        kernel.restore(b"not a snapshot")
+
+
+def test_restoring_a_truncated_snapshot_is_refused(kernel: GeometryKernel, plate) -> None:
+    """Half a file is the failure a caller cannot detect for itself."""
+    _snapshotting(kernel)
+    blob = kernel.snapshot(plate.solid)
+    with pytest.raises(FeatureBuildError):
+        kernel.restore(blob[: len(blob) // 2])
+
+
+def test_snapshotting_an_unknown_handle_is_refused(kernel: GeometryKernel, plate) -> None:
+    _snapshotting(kernel)
+    kernel.release(plate.solid)
+    with pytest.raises(FeatureBuildError):
+        kernel.snapshot(plate.solid)

@@ -34,6 +34,7 @@ test kernel that quietly disagrees with the real one is worse than none.
 from __future__ import annotations
 
 import itertools
+import pickle
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
@@ -607,6 +608,7 @@ class FakeKernel:
                 Capability.POCKET,
                 Capability.TESSELLATE,
                 Capability.MESH_EXPORT,
+                Capability.SNAPSHOT,
             }
         )
 
@@ -776,6 +778,61 @@ class FakeKernel:
 
     def release(self, solid_handle: SolidHandle) -> None:
         self._solids.pop(solid_handle.id, None)
+
+    # -- snapshots ---------------------------------------------------------
+
+    def snapshot(self, solid_handle: SolidHandle) -> bytes:
+        """Pickle the occupancy grid and its face records.
+
+        This kernel's solids are plain Python data, so there is no serialisation
+        problem to solve — which is exactly why implementing the port here is
+        worth doing. It proves the port describes *restoring identity* rather
+        than describing OpenCascade's file format.
+        """
+        solid = self._lookup(solid_handle)
+        return pickle.dumps(
+            {
+                "xs": solid.xs,
+                "ys": solid.ys,
+                "zs": solid.zs,
+                "occupied": solid.occupied,
+                "faces": solid.faces,
+                "prism": solid.prism,
+            },
+            protocol=pickle.HIGHEST_PROTOCOL,
+        )
+
+    def restore(self, blob: bytes) -> SolidResult:
+        """Register a solid from :meth:`snapshot`.
+
+        Nothing to verify and nothing to re-derive: a face record in this kernel
+        carries its own ref, provenance and plane, so the refs come back
+        identical by construction. The OCCT adapter has to work for it, which is
+        the asymmetry that makes the port worth having two implementations of.
+        """
+        # Our own bytes, addressed by a content hash we computed. Any malformed
+        # blob is a cache miss, so every failure mode collapses to one branch.
+        try:
+            state = pickle.loads(blob)
+        except Exception as error:
+            raise FeatureBuildError(
+                feature="<snapshot>",
+                reason=f"the stored solid could not be read back: {error}",
+            ) from error
+
+        self._counter += 1
+        handle = SolidHandle(id=f"s{self._counter}", kernel=self.name)
+        solid = _Solid(
+            handle=handle,
+            xs=list(state["xs"]),
+            ys=list(state["ys"]),
+            zs=list(state["zs"]),
+            occupied=set(state["occupied"]),
+            faces=tuple(state["faces"]),
+            prism=state["prism"],
+        )
+        self._solids[handle.id] = solid
+        return self._result(solid, deleted=())
 
     # -- internals ---------------------------------------------------------
 

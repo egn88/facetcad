@@ -84,12 +84,14 @@ mesh kernel, a B-rep kernel, or the fake kernel all feed the same naming engine.
 | Port | Purpose | Adapter |
 |---|---|---|
 | `DocumentRepository` | Load/save/list project documents | filesystem (YAML) |
+| `SnapshotStore` | Keep built geometry between runs, by content hash | filesystem (binary) |
 | `MeshExporter` | STL (binary and ASCII), OBJ | OCCT, analytic |
 | `BrepExporter` | STEP | OCCT only — `Capability` guarded |
 | `DrawingExporter` | DXF / SVG, as planar sections | OCCT only — `Capability` guarded |
 | `ProfileExtractor` | One face or one section, flattened to 2D curves | OCCT only — `Capability` guarded |
 | `BlendKernel` | fillet, chamfer | OCCT only — `Capability` guarded |
 | `ThreadKernel` | the cut helical form | OCCT only — `Capability` guarded |
+| `SolidSnapshots` | Serialise a solid and restore it with the *same* refs | both — `Capability` guarded |
 
 The drawing exporter takes sections rather than hidden-line projections on purpose: a
 section is exactly the material present at that height, which is what a laser or a router
@@ -113,11 +115,11 @@ exactly, in pure Python. It exists for three reasons:
 1. **It proves the port is real.** A port with one implementation is a guess. Two force
    the abstraction to be honest, and any leak of OCCT concepts into `application` shows up
    immediately as a compile-time hole in the fake.
-2. **Test speed.** With OCCT absent entirely, 596 of the 855 backend tests still run — the
-   naming, selector and recompute suites, which are the ones that fail first when the tag
-   algebra is wrong — and they finish in about eleven seconds against the ninety-seven the
-   full suite takes. The parameter sweeps are among the 248 that drop out, deliberately: a
-   stability proof has to run on the kernel that ships.
+2. **Test speed.** With OCCT absent entirely, 660 of the 975 backend tests still run — the
+   naming, selector, recompute and snapshot suites, which are the ones that fail first when
+   the tag algebra is wrong — and they finish in about thirty-six seconds against the two
+   and a half minutes the full suite takes. The parameter sweeps are among the 315 that drop
+   out, deliberately: a stability proof has to run on the kernel that ships.
 3. **Bisecting failures.** When a model misbehaves, running it against both kernels
    answers "is this our naming layer or the kernel?" in one command.
 

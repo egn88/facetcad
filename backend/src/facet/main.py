@@ -23,6 +23,7 @@ except ImportError:  # pragma: no cover - depends on which extras are present
 
 from facet.adapters.http import api
 from facet.adapters.persistence.filesystem import FilesystemDocumentRepository
+from facet.adapters.persistence.snapshots import FilesystemSnapshotStore
 from facet.application.ports.geometry import GeometryKernel
 from facet.application.services import ProjectService
 
@@ -87,9 +88,31 @@ def build_kernel() -> GeometryKernel:
 
 
 def build_service() -> ProjectService:
+    """Wire the repository, the kernel and the snapshot store together.
+
+    Snapshots live beside the documents but in their own directory, because the
+    two want opposite things from a backup: the documents are the model and must
+    be kept, the snapshots are derived and can always be recomputed. Separating
+    them means "back up the projects" does not mean "back up a gigabyte of
+    B-reps", and deleting the cache is obviously safe.
+
+    ``FACET_CACHE=off`` disables it, which is the setting for a benchmark or for
+    a read-only volume where every write would fail anyway.
+    """
     root = Path(os.environ.get("FACET_DATA", "./data/projects"))
     kernel = build_kernel()
-    service = ProjectService(FilesystemDocumentRepository(root), kernel)
+
+    configured = os.environ.get("FACET_CACHE", "").strip()
+    if configured.lower() in ("off", "0", "false", "no"):
+        snapshots = None
+    else:
+        snapshots = FilesystemSnapshotStore(
+            Path(configured) if configured else root.parent / "snapshots"
+        )
+
+    service = ProjectService(
+        FilesystemDocumentRepository(root), kernel, snapshots=snapshots
+    )
     # When a wedged worker is killed, every cached solid handle refers to memory
     # that no longer exists — and the replacement reuses the same ids for
     # different shapes, so a stale cache would be worse than a slow one.
