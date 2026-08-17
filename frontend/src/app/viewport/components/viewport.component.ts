@@ -376,15 +376,23 @@ export class ViewportComponent implements OnDestroy {
 
   private addBodyGeometry(group: THREE.Group, mesh: BodyMesh): void {
     // Faces share one position/normal buffer and each owns an index range, so
-    // a raycast hit resolves to exactly one tag.
-    const positions = new THREE.BufferAttribute(new Float32Array(mesh.positions), 3);
-    const normals = new THREE.BufferAttribute(new Float32Array(mesh.normals), 3);
+    // a raycast hit resolves to exactly one tag. The arrays arrive already
+    // typed, so there is nothing to convert.
+    const positions = new THREE.BufferAttribute(mesh.positions, 3);
+    const normals = new THREE.BufferAttribute(mesh.normals, 3);
 
     for (const range of mesh.faceRanges) {
       const geometry = new THREE.BufferGeometry();
       geometry.setAttribute('position', positions);
       geometry.setAttribute('normal', normals);
-      geometry.setIndex(mesh.indices.slice(range.start, range.start + range.count));
+      // subarray, not slice: a view onto the shared index buffer rather than a
+      // copy per face, and a body can have hundreds of faces.
+      geometry.setIndex(
+        new THREE.BufferAttribute(
+          mesh.indices.subarray(range.start, range.start + range.count),
+          1,
+        ),
+      );
       geometry.computeBoundingSphere();
 
       const face = new THREE.Mesh(

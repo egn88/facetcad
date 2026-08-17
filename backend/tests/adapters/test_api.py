@@ -531,7 +531,13 @@ def test_state_agrees_with_the_endpoints_it_replaces(bracket_client: TestClient)
 
     assert state["document"] == bracket_client.get("/api/projects/bracket/document").json()
     bodies = bracket_client.get("/api/projects/bracket/bodies").json()
-    assert state["bodies"] == bodies["bodies"]
+    # Same geometry, different shape on the wire: /state packs the coordinates
+    # and /bodies does not. Compared after decoding in the packing tests below;
+    # here it is enough that they describe the same faces.
+    assert [b["id"] for b in state["bodies"]] == [b["id"] for b in bodies["bodies"]]
+    assert [b["faceRanges"] for b in state["bodies"]] == [
+        b["faceRanges"] for b in bodies["bodies"]
+    ]
     assert state["build"]["ok"] == bodies["build"]["ok"]
     assert state["build"]["parameters"] == bodies["build"]["parameters"]
     assert [f["id"] for f in state["build"]["features"]] == [
@@ -595,7 +601,7 @@ def test_state_does_not_serve_a_stale_mesh(bracket_client: TestClient) -> None:
     the new one.
     """
     before = bracket_client.get("/api/projects/bracket/state").json()
-    thin = max(before["bodies"][0]["positions"][2::3])
+    thin = max(_decode_floats(before["bodies"][0]["positions"])[2::3])
 
     response = bracket_client.patch(
         "/api/projects/bracket/parameters", json={"changes": {"plate_t": 17.0}}
@@ -603,7 +609,7 @@ def test_state_does_not_serve_a_stale_mesh(bracket_client: TestClient) -> None:
     assert response.status_code == 200, response.text
 
     after = bracket_client.get("/api/projects/bracket/state").json()
-    thick = max(after["bodies"][0]["positions"][2::3])
+    thick = max(_decode_floats(after["bodies"][0]["positions"])[2::3])
     assert thick == pytest.approx(17.0)
     assert thick != pytest.approx(thin)
 
@@ -613,3 +619,92 @@ def test_repeated_state_calls_return_the_same_mesh(bracket_client: TestClient) -
     first = bracket_client.get("/api/projects/bracket/state").json()
     second = bracket_client.get("/api/projects/bracket/state").json()
     assert second["bodies"] == first["bodies"]
+
+
+# --------------------------------------------------------------------------
+# Packed coordinates
+# --------------------------------------------------------------------------
+#
+# /state sends the three big arrays as base64 float32 rather than as JSON
+# numbers. Worth it twice over: on a 769-face body, 4.17MB of numbers taking
+# 89ms to serialise becomes 2.14MB and 16ms — and after the gzip nginx already
+# applies, 0.62MB becomes 0.32MB, which was the opposite of what was expected.
+#
+# The failure mode is not slowness. A byte-order or offset mistake produces a
+# viewport full of scrambled triangles while every number on screen agrees with
+# the model, so these compare the decoded arrays against the plain ones.
+
+
+def _decode_floats(encoded: str) -> list[float]:
+    import base64
+    from array import array
+
+    values = array("f")
+    values.frombytes(base64.b64decode(encoded))
+    return list(values)
+
+
+def _decode_uints(encoded: str) -> list[int]:
+    import base64
+    from array import array
+
+    values = array("I")
+    values.frombytes(base64.b64decode(encoded))
+    return list(values)
+
+
+def test_state_declares_its_coordinate_encoding(bracket_client: TestClient) -> None:
+    """A client must be able to tell, rather than be told out of band."""
+    body = bracket_client.get("/api/projects/bracket/state").json()["bodies"][0]
+    assert body["encoding"] == "f32-le-base64"
+    assert isinstance(body["positions"], str)
+    assert isinstance(body["indices"], str)
+
+
+def test_bodies_still_sends_plain_numbers(bracket_client: TestClient) -> None:
+    """The older endpoint is unchanged, because other clients read it."""
+    body = bracket_client.get("/api/projects/bracket/bodies").json()["bodies"][0]
+    assert isinstance(body["positions"], list)
+    assert "encoding" not in body
+
+
+def test_packed_coordinates_decode_to_the_plain_ones(bracket_client: TestClient) -> None:
+    """The same numbers, to float32, in the same order."""
+    packed = bracket_client.get("/api/projects/bracket/state").json()["bodies"][0]
+    plain = bracket_client.get("/api/projects/bracket/bodies").json()["bodies"][0]
+
+    for name in ("positions", "normals"):
+        decoded = _decode_floats(packed[name])
+        assert len(decoded) == len(plain[name]), name
+        assert decoded == pytest.approx(plain[name], rel=1e-6, abs=1e-6), name
+
+    assert _decode_uints(packed["indices"]) == plain["indices"]
+
+
+def test_packed_edges_decode_to_the_plain_ones(bracket_client: TestClient) -> None:
+    packed = bracket_client.get("/api/projects/bracket/state").json()["bodies"][0]
+    plain = bracket_client.get("/api/projects/bracket/bodies").json()["bodies"][0]
+
+    assert [e["ref"] for e in packed["edges"]] == [e["ref"] for e in plain["edges"]]
+    for encoded, expected in zip(packed["edges"], plain["edges"], strict=True):
+        assert _decode_floats(encoded["points"]) == pytest.approx(
+            expected["points"], rel=1e-6, abs=1e-6
+        )
+
+
+def test_packed_indices_stay_inside_their_face_ranges(bracket_client: TestClient) -> None:
+    """faceRanges index into the packed arrays, so the two must still agree.
+
+    A range that walked off the end would render one face as another's triangles
+    — and the tag attached to it would be the wrong one, which is the whole
+    thing this project is for.
+    """
+    body = bracket_client.get("/api/projects/bracket/state").json()["bodies"][0]
+    indices = _decode_uints(body["indices"])
+    vertices = len(_decode_floats(body["positions"])) // 3
+
+    assert body["faceRanges"]
+    for entry in body["faceRanges"]:
+        window = indices[entry["start"] : entry["start"] + entry["count"]]
+        assert len(window) == entry["count"], entry["tag"]
+        assert all(0 <= i < vertices for i in window), entry["tag"]

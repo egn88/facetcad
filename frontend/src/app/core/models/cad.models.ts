@@ -96,22 +96,52 @@ export interface FaceRange {
   count: number;
 }
 
-/** One body's geometry, in its own coordinates, plus where it sits. */
+/**
+ * One body's geometry, in its own coordinates, plus where it sits.
+ *
+ * Coordinates are typed arrays rather than `number[]` because that is what they
+ * become anyway — the renderer's first move is `new Float32Array(...)`. `/state`
+ * sends them base64-packed and they are decoded once, at the API boundary, so
+ * nothing downstream knows the difference.
+ */
 export interface BodyMesh {
   id: string;
   /** Column-major 4x4. Kept separate from the points so moving a body cannot
    * perturb the geometry the naming engine fingerprints. */
+  placement: number[];
+  positions: Float32Array;
+  normals: Float32Array;
+  indices: Uint32Array;
+  faceRanges: FaceRange[];
+  edges: { ref: string; points: Float32Array }[];
+}
+
+/** A body as `/state` puts it on the wire. */
+export interface PackedBodyMesh {
+  id: string;
+  placement: number[];
+  encoding: string;
+  positions: string;
+  normals: string;
+  indices: string;
+  faceRanges: FaceRange[];
+  edges: { ref: string; points: string }[];
+}
+
+/** `/bodies` still sends plain numbers, for clients that already read it. */
+export interface BodiesPayload {
+  bodies: PlainBodyMesh[];
+  build: BuildResult;
+}
+
+export interface PlainBodyMesh {
+  id: string;
   placement: number[];
   positions: number[];
   normals: number[];
   indices: number[];
   faceRanges: FaceRange[];
   edges: { ref: string; points: number[] }[];
-}
-
-export interface BodiesPayload {
-  bodies: BodyMesh[];
-  build: BuildResult;
 }
 
 /**
@@ -123,7 +153,7 @@ export interface BodiesPayload {
  */
 export interface ViewState {
   document: CadDocument;
-  bodies: BodyMesh[];
+  bodies: PackedBodyMesh[];
   topologies: TopologiesPayload;
   sketches: SketchGeometry;
   build: BuildResult;
