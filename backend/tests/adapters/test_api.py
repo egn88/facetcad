@@ -583,3 +583,33 @@ def test_state_reports_a_broken_model_rather_than_failing(bracket_client: TestCl
 
 def test_state_of_an_unknown_project_is_a_404(client: TestClient) -> None:
     assert client.get("/api/projects/nope/state").status_code == 404
+
+
+def test_state_does_not_serve_a_stale_mesh(bracket_client: TestClient) -> None:
+    """Triangles are cached by the solid they came from, so an edit must move them.
+
+    Keyed on the handle rather than the document: a cached feature keeps its
+    handle and a rebuilt one gets a new id, so this is the same content-hash
+    reasoning the engine uses. Worth asserting because the failure would be a
+    viewport showing the previous shape while every number on screen agreed with
+    the new one.
+    """
+    before = bracket_client.get("/api/projects/bracket/state").json()
+    thin = max(before["bodies"][0]["positions"][2::3])
+
+    response = bracket_client.patch(
+        "/api/projects/bracket/parameters", json={"changes": {"plate_t": 17.0}}
+    )
+    assert response.status_code == 200, response.text
+
+    after = bracket_client.get("/api/projects/bracket/state").json()
+    thick = max(after["bodies"][0]["positions"][2::3])
+    assert thick == pytest.approx(17.0)
+    assert thick != pytest.approx(thin)
+
+
+def test_repeated_state_calls_return_the_same_mesh(bracket_client: TestClient) -> None:
+    """And when nothing changed, the cached mesh is the same mesh."""
+    first = bracket_client.get("/api/projects/bracket/state").json()
+    second = bracket_client.get("/api/projects/bracket/state").json()
+    assert second["bodies"] == first["bodies"]

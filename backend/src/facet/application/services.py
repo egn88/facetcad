@@ -104,6 +104,13 @@ class ProjectService:
         # behave exactly as they did, cold on every start.
         self._snapshots = snapshots
         self._engines: dict[str, RecomputeEngine] = {}
+        # Triangles, keyed by the solid they came from. A mesh is a pure function
+        # of a solid and a tolerance, and a solid that has not been rebuilt keeps
+        # the same handle -- so this is the same content-hash reasoning the
+        # engine uses, one layer up. Worth it because tessellation was 74% of a
+        # warm /state response and 86% with every thread modelled: the rebuild
+        # was cached and the mesh was not.
+        self._meshes: dict[str, Tessellation] = {}
 
     def invalidate_caches(self) -> None:
         """Forget every cached rebuild.
@@ -117,8 +124,13 @@ class ProjectService:
         handles — they never referred to the dead worker's memory, and they are
         the one thing that makes the recovery cheap instead of another full
         rebuild.
+
+        The mesh cache is keyed by handle and so does go: a replacement worker
+        numbers its solids from the start again, and a mesh under a reused id
+        would be the wrong shape rather than a slow one.
         """
         self._engines.clear()
+        self._meshes.clear()
 
     # -- kernel introspection ---------------------------------------------
 
@@ -309,7 +321,7 @@ class ProjectService:
 
         merged = Tessellation()
         for placement, solid in wanted:
-            piece = self._kernel.tessellate(solid.handle, self._tolerance)
+            piece = self._tessellate(solid)
             merged = _joined(merged, _placed_mesh(piece, placement))
         return merged, result
 
@@ -342,6 +354,26 @@ class ProjectService:
         result = self.recompute(project_id)
         return self._mesh_payload(result), result
 
+    #: How many meshes to keep. A handful per body covers alternating between
+    #: detail levels and a couple of edits; beyond that the oldest go.
+    _MESH_CACHE_LIMIT = 24
+
+    def _tessellate(self, solid: NamedSolid) -> Tessellation:
+        """This solid's triangles, computed at most once.
+
+        Keyed on the handle rather than on the document, because that is exactly
+        what changes when the geometry does: a cached feature keeps its handle,
+        a rebuilt one gets a new id.
+        """
+        cached = self._meshes.get(solid.handle.id)
+        if cached is not None:
+            return cached
+        mesh = self._kernel.tessellate(solid.handle, self._tolerance)
+        if len(self._meshes) >= self._MESH_CACHE_LIMIT:
+            del self._meshes[next(iter(self._meshes))]
+        self._meshes[solid.handle.id] = mesh
+        return mesh
+
     def _mesh_payload(self, result: RecomputeResult) -> list[dict[str, object]]:
         meshes: list[dict[str, object]] = []
 
@@ -357,7 +389,7 @@ class ProjectService:
                 )
                 continue
 
-            tessellation = self._kernel.tessellate(body.solid.handle, self._tolerance)
+            tessellation = self._tessellate(body.solid)
             tags = {ref: str(tag) for ref, tag in body.solid.refs.items()}
             meshes.append(
                 {
