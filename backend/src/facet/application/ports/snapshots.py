@@ -5,11 +5,11 @@ spec, the parameters it reads, the frame it sits on and the key of the feature
 before it. That hash is a perfectly good filename, so the only thing missing is
 somewhere to put the bytes.
 
-Deliberately the smallest interface that can serve that: get, put, forget. No
-listing, no iteration, no transactions. A store that loses everything is still a
-correct store — the document is the source of truth and the answer is always
-recomputable — which is why every method here is allowed to fail silently and
-why the engine treats a miss and an error identically.
+Deliberately the smallest interface that can serve that: ask, get, put, forget.
+No listing, no iteration, no transactions. A store that loses everything is
+still a correct store — the document is the source of truth and the answer is
+always recomputable — which is why every method here is allowed to fail silently
+and why the engine treats a miss and an error identically.
 """
 
 from __future__ import annotations
@@ -25,6 +25,21 @@ class SnapshotStore(Protocol):
     identifies the content, so an implementation must not interpret them beyond
     making them safe to store under.
     """
+
+    def has(self, key: str) -> bool:
+        """Whether anything is stored under ``key``, without reading it.
+
+        Separate from :meth:`load` because the callers that ask are the ones
+        that must not pay to find out. Storing a body costs the kernel a
+        serialisation and the disk half a megabyte, and a warm rebuild would
+        otherwise redo both on every request to write bytes identical to the
+        ones already there; deciding whether to warm export geometry is the
+        same question one level up.
+
+        A store that cannot answer cheaply should answer ``False``: the caller's
+        response is to do the work, which is always correct.
+        """
+        ...
 
     def load(self, key: str) -> bytes | None:
         """The bytes stored under ``key``, or None if there are none.

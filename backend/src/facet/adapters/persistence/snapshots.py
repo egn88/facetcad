@@ -58,6 +58,22 @@ class FilesystemSnapshotStore:
 
     # -- the port ----------------------------------------------------------
 
+    def has(self, key: str) -> bool:
+        """Whether the file is there, without reading it.
+
+        Deliberately not a read: the callers asking are avoiding the cost of the
+        content, so an implementation that loaded to answer would defeat the
+        question. A file that exists but is empty is a failed write and reads
+        back as a miss, so it answers False here too.
+        """
+        path = self._path(key)
+        if path is None:
+            return False
+        try:
+            return path.stat().st_size > 0
+        except OSError:
+            return False
+
     def load(self, key: str) -> bytes | None:
         path = self._path(key)
         if path is None:

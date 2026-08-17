@@ -44,6 +44,9 @@ class MemoryStore:
         self.loads = 0
         self.saves = 0
 
+    def has(self, key: str) -> bool:
+        return bool(self.blobs.get(key))
+
     def load(self, key: str) -> bytes | None:
         self.loads += 1
         return self.blobs.get(key)

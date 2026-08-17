@@ -118,6 +118,15 @@ class BodyResult:
     outcomes: tuple[FeatureOutcome, ...] = ()
     placement: Frame = field(default_factory=Frame.world)
     error: FacetCADError | None = None
+    #: The content key of the state ``solid`` is actually in — the key of the
+    #: deepest feature that built, which on a history that stopped early is the
+    #: last good one rather than the last declared one.
+    #:
+    #: Exposed because everything derived from a solid is a pure function of it:
+    #: this is what lets a mesh be cached against the geometry rather than
+    #: against a kernel handle, which is reissued on every restore and so could
+    #: never be hit twice.
+    key: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -337,7 +346,7 @@ class RecomputeEngine:
         halted = False
 
         # The key chain costs no geometry, so it can be worked out for the whole
-        # history up front — which is what lets a snapshot of the *last* feature
+        # history up front — which is what lets a state of the *last* feature
         # be found without building the thirty-four before it. Walking the
         # features first and looking for the cached one last would never reach
         # it: the first miss rebuilds, and after that every key still matches
@@ -440,6 +449,7 @@ class RecomputeEngine:
             solid=current,
             outcomes=tuple(outcomes),
             placement=placement,
+            key=upstream_key or None,
         )
 
     # -- snapshots ---------------------------------------------------------
@@ -480,36 +490,66 @@ class RecomputeEngine:
         frames: Mapping[str, Frame],
         outcomes: list[FeatureOutcome],
     ) -> tuple[int, NamedSolid] | None:
-        """Start from a stored solid, if one matches a state this build reaches.
+        """Start from the deepest state already available, wherever it lives.
 
         Searched from the end backwards, so the longest usable prefix wins: on
         opening a document that is the whole history, and after appending a
         feature it is everything but the new one.
 
-        Appends ``outcomes`` for the features the snapshot accounts for. They
-        report ``CACHED`` because nothing was recomputed, and no face count,
-        because no per-feature state exists to count — only the state they add
-        up to.
-        """
-        if self._snapshots is None:
-            return None
+        At each depth the in-process cache is asked *before* the snapshot store,
+        and that ordering is the whole point of this method. A restore is not
+        free — it reads a file, sends the bytes to the kernel, and has the kernel
+        re-derive and re-check every face's fingerprint before it will trust the
+        names — while a solid this process already holds costs a dict lookup.
+        Reaching for the store first meant a warm server paid the cold price on
+        every request: fourteen bodies restored and re-tessellated to answer a
+        question it had already answered, 300ms against 55ms on the document that
+        prompted this.
 
+        The search is still by depth rather than by source, because a *deeper*
+        stored state beats a shallower remembered one — after an edit early in a
+        long history, the snapshot of the state just before it saves far more
+        than the memory of the state before that.
+
+        Appends ``outcomes`` for the features the resumed state accounts for.
+        They report ``CACHED`` because nothing was recomputed, and a face count
+        only where this process happens to hold that feature's own state: a
+        restored solid is the sum of its history, with nothing per-feature left
+        to count.
+        """
         for index in range(len(keys) - 1, -1, -1):
             key = keys[index]
             if key is None:
                 continue
-            restored = self._load(body.id, detail, key)
-            if restored is None:
+
+            slot = f"{detail}/{body.id}/{body.features[index].id}"
+            remembered = self._cache.get(slot)
+            if remembered is not None and remembered.key == key:
+                resumed = remembered.solid
+            elif self._snapshots is None:
                 continue
+            else:
+                loaded = self._load(body.id, detail, key)
+                if loaded is None:
+                    continue
+                # Seeded so the next rebuild in this process finds it here and
+                # does not go back to the store.
+                self._cache[slot] = _CacheEntry(key=key, solid=loaded)
+                resumed = loaded
 
             # Frames must be registered for the features that were *not* run.
             # Split ordering resolves fragments in the owning feature's frame, so
             # a later feature splitting a face that belongs to a skipped one
             # would otherwise order its fragments in the world frame and pick
-            # different ordinals than a full rebuild. The same reason a cache hit
-            # re-registers, one prefix at a time instead of one feature.
-            for spec in body.features[: index + 1]:
+            # different ordinals than a full rebuild.
+            for position, spec in enumerate(body.features[: index + 1]):
                 _reregister_frames(naming, document, spec, frames)
+                held = self._cache.get(f"{detail}/{body.id}/{spec.id}")
+                known = (
+                    held.solid
+                    if held is not None and held.key == keys[position]
+                    else None
+                )
                 outcomes.append(
                     FeatureOutcome(
                         id=spec.id,
@@ -519,13 +559,10 @@ class RecomputeEngine:
                             if spec.suppressed
                             else FeatureStatus.CACHED
                         ),
+                        face_count=len(known.topology.faces) if known else 0,
                     )
                 )
-            # Seeded so a second rebuild in this process needs no restore at all.
-            self._cache[f"{detail}/{body.id}/{body.features[index].id}"] = _CacheEntry(
-                key=key, solid=restored
-            )
-            return index, restored
+            return index, resumed
         return None
 
     def _load(self, body_id: str, detail: str, key: str) -> NamedSolid | None:
@@ -585,6 +622,15 @@ class RecomputeEngine:
             return
         final = next((key for key in reversed(keys) if key is not None), None)
         if final is None:
+            return
+
+        # Already there, and the key says the bytes would be identical. Asked
+        # rather than assumed from the outcomes, so a store that was added since
+        # the last run — or that quietly failed a write — still gets filled.
+        # Worth the question: without it a warm rebuild re-serialised every body
+        # through the kernel and rewrote half a megabyte on every request, which
+        # was 33ms of the 73 a warm rebuild had left.
+        if self._snapshots.has(self._snapshot_key(body.id, detail, final)):
             return
 
         take = getattr(self._kernel, "snapshot", None)
