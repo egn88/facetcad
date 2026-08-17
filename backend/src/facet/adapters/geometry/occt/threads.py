@@ -49,6 +49,7 @@ from OCP.TopAbs import TopAbs_WIRE
 from OCP.TopExp import TopExp_Explorer
 from OCP.TopoDS import TopoDS, TopoDS_Compound, TopoDS_Shape
 
+from facet.adapters.geometry.occt.booleans import boolean
 from facet.application.ports.geometry import ThreadRequest
 from facet.domain.errors import FeatureBuildError
 from facet.domain.math3d import Frame, Vec3
@@ -146,9 +147,7 @@ def _clipped(tool: TopoDS_Shape, request: ThreadRequest, outer: float) -> TopoDS
         outer + OVERLAP,
         max(request.length - 2 * lead, lead),
     ).Shape()
-    common = BRepAlgoAPI_Common(tool, band)
-    common.SetRunParallel(True)
-    common.Build()
+    common = boolean(BRepAlgoAPI_Common(), tool, band)
     if not common.IsDone():
         raise FeatureBuildError(
             feature=request.feature, reason="the thread form could not be trimmed to length"
@@ -163,9 +162,7 @@ def cut_thread(base: TopoDS_Shape, request: ThreadRequest) -> BRepAlgoAPI_Cut:
     history map to attribute faces, and building the thread twice to get it
     would double the one genuinely expensive step.
     """
-    operation = BRepAlgoAPI_Cut(base, thread_tool(request))
-    operation.SetRunParallel(True)
-    operation.Build()
+    operation = boolean(BRepAlgoAPI_Cut(), base, thread_tool(request))
     if not operation.IsDone():
         raise FeatureBuildError(
             feature=request.feature,

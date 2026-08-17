@@ -52,12 +52,12 @@ from OCP.GeomAbs import GeomAbs_CurveType, GeomAbs_SurfaceType
 from OCP.gp import gp_Ax2, gp_Ax3, gp_Circ, gp_Dir, gp_Pln, gp_Pnt, gp_Vec
 from OCP.GProp import GProp_GProps
 from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_REVERSED
-from OCP.TopExp import TopExp, TopExp_Explorer
+from OCP.TopExp import TopExp_Explorer
 from OCP.TopLoc import TopLoc_Location
 from OCP.TopoDS import TopoDS, TopoDS_Edge, TopoDS_Face, TopoDS_Shape
-from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
 
 from facet.adapters.export.drawing import export_drawing
+from facet.adapters.geometry.occt.booleans import boolean
 from facet.adapters.geometry.occt.profiles import face_profile, section_profile
 from facet.adapters.geometry.occt.threads import cut_thread
 from facet.application.ports.geometry import (
@@ -154,7 +154,21 @@ def _unique_edges_of(shape: TopoDS_Shape) -> list[TopoDS_Edge]:
 
 
 def _shape_list(items) -> list[TopoDS_Shape]:
-    """OCP exposes TopTools_ListOfShape as a plain Python iterable."""
+    """The shapes in a TopTools_ListOfShape.
+
+    ``list(items)`` is correct and 250x slower: OCP's iterator costs ~90us per
+    item, against 0.5us for First(). Almost every list here holds one or two
+    shapes -- an edge has two adjacent faces, a Modified() image is usually one
+    -- so those two cases are read directly and only the rare longer list pays
+    for the iterator.
+    """
+    size = items.Size()
+    if size == 0:
+        return []
+    if size == 1:
+        return [items.First()]
+    if size == 2:
+        return [items.First(), items.Last()]
     return list(items)
 
 
@@ -422,24 +436,34 @@ def _sweep(profile: _BuiltProfile, direction: Vec3, feature: str) -> _Prism:
 
 
 def _images_of(operation, face: TopoDS_Face, result_faces: _ShapeSet) -> list[TopoDS_Face]:
-    """Which result faces a given input face became.
+    """Which result faces a given input face became."""
+    return _images_and_change(operation, face, result_faces)[0]
+
+
+def _images_and_change(
+    operation, face: TopoDS_Face, result_faces: _ShapeSet
+) -> tuple[list[TopoDS_Face], bool]:
+    """Which result faces an input face became, and whether it was touched.
 
     OCCT reports nothing for a face that passed through untouched, so an empty
     ``Modified`` list means "unchanged" rather than "gone" — the distinction
-    that decides whether a tag survives or is retired.
+    that decides whether a tag survives or is retired. It decides one more thing
+    here: an untouched face is the *same* surface with the same bounds, so its
+    area, centroid and normal cannot have moved and need not be integrated
+    again.
     """
     if operation.IsDeleted(face):
-        return []
+        return [], True
     modified = operation.Modified(face)
     if modified.Extent() == 0:
-        return [face] if result_faces.contains(face) else []
+        return ([face] if result_faces.contains(face) else []), False
 
     images: list[TopoDS_Face] = []
     for shape in _shape_list(modified):
         image = TopoDS.Face_s(shape)
         if result_faces.contains(image):
             images.append(image)
-    return images
+    return images, True
 
 
 # --------------------------------------------------------------------------
@@ -453,8 +477,18 @@ class _Solid:
     shape: TopoDS_Shape
     #: ref -> face, so a later operation can report inherited parents
     faces: list[tuple[Ref, TopoDS_Face]] = field(default_factory=list)
+    #: ref -> fingerprint, kept so a face that a later boolean does not touch is
+    #: never measured twice. Surface integration is ~0.2ms a face, and a linear
+    #: history re-measures every face on every feature -- which is what makes a
+    #: 40-feature model cost O(N^2) rather than O(N).
+    fingerprints: dict[Ref, FaceFingerprint] = field(default_factory=dict)
     #: edge ref -> (edge, the two face refs it separates)
     edges: dict[Ref, tuple[TopoDS_Edge, tuple[Ref, Ref]]] = field(default_factory=dict)
+    #: The solid's volume, integrated at most once. A cut measures the body
+    #: before and after to prove it removed something, and "after" is the next
+    #: feature's "before" -- so without this every feature integrates the whole
+    #: solid twice over. On a threaded body that is 145ms a time.
+    _volume_cache: float | None = None
     #: How each face of *this* solid came to be, kept so a later fuse can report
     #: an added body's faces with their real origin rather than as anonymous
     #: inherited ones — a padded side is still a side, whichever body it joins.
@@ -553,8 +587,7 @@ class OcctKernel:
         else:
             tool = _sweep(profile, normal * request.depth, request.feature)
 
-        operation = BRepAlgoAPI_Cut(source.shape, tool.shape)
-        operation.Build()
+        operation = boolean(BRepAlgoAPI_Cut(), source.shape, tool.shape)
         if not operation.IsDone():
             raise FeatureBuildError(
                 feature=request.feature, reason="the boolean cut failed in the kernel"
@@ -567,20 +600,29 @@ class OcctKernel:
             )
 
         provenance = _ShapeMap()
+        known = _ShapeMap()
         surviving_refs: set[Ref] = set()
 
         for ref, face in source.faces:
-            for image in _images_of(operation, face, result_faces):
+            images, changed = _images_and_change(operation, face, result_faces)
+            for image in images:
                 provenance.set(image, FaceProvenance(origin=Origin.INHERITED, parent=ref))
                 surviving_refs.add(ref)
+                if not changed:
+                    kept = source.fingerprints.get(ref)
+                    if kept is not None:
+                        known.set(image, kept)
 
+        lateral = 0
         for face in _faces_of(tool.shape):
             origin = _lookup(tool.provenance, face)
             for image in _images_of(operation, face, result_faces):
+                if origin.origin == Origin.SWEPT:
+                    lateral += 1
                 if provenance.get(image) is None:
                     provenance.set(image, origin)
 
-        if not _removed_material(source.shape, result, tool.shape):
+        if not self._cut_took_material(lateral, source, result, tool.shape):
             raise FeatureBuildError(
                 feature=request.feature,
                 reason=(
@@ -596,7 +638,9 @@ class OcctKernel:
             for ref, _ in source.faces
             if ref not in surviving_refs
         )
-        return self._store(result, lambda face: _lookup(provenance, face), deleted=deleted)
+        return self._store(
+            result, lambda face: _lookup(provenance, face), deleted=deleted, known=known
+        )
 
     def fuse(self, base: SolidHandle, addition: SolidHandle) -> SolidResult:
         """Union two solids.
@@ -611,19 +655,24 @@ class OcctKernel:
         """
         first = self._lookup_solid(base)
         second = self._lookup_solid(addition)
-        operation = BRepAlgoAPI_Fuse(first.shape, second.shape)
-        operation.Build()
+        operation = boolean(BRepAlgoAPI_Fuse(), first.shape, second.shape)
         if not operation.IsDone():
             raise FeatureBuildError(feature="<fuse>", reason="the boolean union failed")
         result = operation.Shape()
         result_faces = _ShapeSet(_faces_of(result))
 
         provenance = _ShapeMap()
+        known = _ShapeMap()
         surviving: set[Ref] = set()
         for ref, face in first.faces:
-            for image in _images_of(operation, face, result_faces):
+            images, changed = _images_and_change(operation, face, result_faces)
+            for image in images:
                 provenance.set(image, FaceProvenance(origin=Origin.INHERITED, parent=ref))
                 surviving.add(ref)
+                if not changed:
+                    kept = first.fingerprints.get(ref)
+                    if kept is not None:
+                        known.set(image, kept)
 
         for ref, face in second.faces:
             origin = second.provenance.get(ref, FaceProvenance(origin=Origin.UNKNOWN))
@@ -637,7 +686,7 @@ class OcctKernel:
             if ref not in surviving
         )
         return self._store(
-            result, lambda face: _lookup(provenance, face), deleted=deleted
+            result, lambda face: _lookup(provenance, face), deleted=deleted, known=known
         )
 
     def fillet(self, base: SolidHandle, request: BlendRequest) -> SolidResult:
@@ -720,12 +769,18 @@ class OcctKernel:
 
         result_faces = _ShapeSet(_faces_of(result))
         provenance = _ShapeMap()
+        known = _ShapeMap()
         surviving: set[Ref] = set()
 
         for ref, face in source.faces:
-            for image in _images_of(builder, face, result_faces):
+            images, changed = _images_and_change(builder, face, result_faces)
+            for image in images:
                 provenance.set(image, FaceProvenance(origin=Origin.INHERITED, parent=ref))
                 surviving.add(ref)
+                if not changed:
+                    kept = source.fingerprints.get(ref)
+                    if kept is not None:
+                        known.set(image, kept)
 
         # A blend face is named by the edge it replaced, and that edge is named
         # by the two faces it separated — so no new naming concept is needed.
@@ -756,6 +811,7 @@ class OcctKernel:
             lambda face: _lookup(provenance, face)
             or FaceProvenance(origin=Origin.UNKNOWN),
             deleted=deleted,
+            known=known,
         )
         return self._attribute_corners(stored, request.feature, kind)
 
@@ -813,6 +869,7 @@ class OcctKernel:
         stored = self._solids[result.solid.id]
         for record in faces:
             stored.provenance[record.ref] = record.provenance
+            stored.fingerprints[record.ref] = record.fingerprint
         return SolidResult(
             solid=result.solid,
             faces=faces,
@@ -878,7 +935,13 @@ class OcctKernel:
         return BoundingBox(min=box.CornerMin().Coord(), max=box.CornerMax().Coord())
 
     def volume(self, solid_handle: SolidHandle) -> float:
-        return _volume(self._lookup_solid(solid_handle).shape)
+        return self._volume_of(self._lookup_solid(solid_handle))
+
+    def _volume_of(self, solid: _Solid) -> float:
+        """A stored solid's volume, integrated once and remembered."""
+        if solid._volume_cache is None:
+            solid._volume_cache = _volume(solid.shape)
+        return solid._volume_cache
 
     def release(self, solid_handle: SolidHandle) -> None:
         self._solids.pop(solid_handle.id, None)
@@ -901,7 +964,30 @@ class OcctKernel:
             raise FeatureBuildError(
                 feature=request.feature, reason="the thread would remove the entire body"
             )
-        if not _removed_material(source.shape, shape, _tool_of(operation)):
+        faces = _faces_of(shape)
+        result_faces = _ShapeSet(faces)
+
+        provenance = _ShapeMap()
+        known = _ShapeMap()
+        surviving: set[Ref] = set()
+        inherited = 0
+        for ref, face in source.faces:
+            images, changed = _images_and_change(operation, face, result_faces)
+            for image in images:
+                provenance.set(image, FaceProvenance(origin=Origin.INHERITED, parent=ref))
+                surviving.add(ref)
+                inherited += 1
+                if not changed:
+                    kept = source.fingerprints.get(ref)
+                    if kept is not None:
+                        known.set(image, kept)
+
+        # Faces the source cannot account for are the helix the cut left behind.
+        # A thread whose axis missed the material produces none, so this is the
+        # same free proof a pocket gets from its tool's walls.
+        if not self._cut_took_material(
+            len(faces) - inherited, source, shape, _tool_of(operation)
+        ):
             raise FeatureBuildError(
                 feature=request.feature,
                 reason=(
@@ -909,14 +995,6 @@ class OcctKernel:
                     "material and that the diameter matches the bore or shaft"
                 ),
             )
-        result_faces = _ShapeSet(_faces_of(shape))
-
-        provenance = _ShapeMap()
-        surviving: set[Ref] = set()
-        for ref, face in source.faces:
-            for image in _images_of(operation, face, result_faces):
-                provenance.set(image, FaceProvenance(origin=Origin.INHERITED, parent=ref))
-                surviving.add(ref)
 
         thread_face = FaceProvenance(origin=Origin.SWEPT, curve=request.curve)
         deleted = tuple(
@@ -930,7 +1008,7 @@ class OcctKernel:
             found = provenance.get(face)
             return found if isinstance(found, FaceProvenance) else thread_face
 
-        return self._store(shape, attribute, deleted=deleted)
+        return self._store(shape, attribute, deleted=deleted, known=known)
 
     def face_profile(
         self, solid_handle: SolidHandle, ref: Ref, tolerance: float = 0.01
@@ -1000,10 +1078,19 @@ class OcctKernel:
         shape: TopoDS_Shape,
         attribute,
         deleted: tuple[DeletedFace, ...] = (),
+        known: _ShapeMap | None = None,
     ) -> SolidResult:
-        """Register a result, assigning refs in a canonical, reproducible order."""
+        """Register a result, assigning refs in a canonical, reproducible order.
+
+        ``known`` carries the fingerprints of faces the operation did not touch.
+        They are reused rather than re-integrated: identical values by
+        construction, so refs still sort the same way, and the measurement that
+        dominated a long history disappears.
+        """
         faces = _faces_of(shape)
-        fingerprints = [(face, _face_fingerprint(face)) for face in faces]
+        fingerprints = [
+            (face, _reuse_or_measure(known, face)) for face in faces
+        ]
         # Sorting by geometry rather than by OCCT's enumeration is what makes
         # refs identical across two builds of the same document.
         fingerprints.sort(key=lambda item: _sort_key(item[1]))
@@ -1019,6 +1106,7 @@ class OcctKernel:
             ref = f"f{index}"
             origin = attribute(face)
             stored.faces.append((ref, face))
+            stored.fingerprints[ref] = fingerprint
             stored.provenance[ref] = origin
             index_of.set(face, ref)
             records.append(
@@ -1035,6 +1123,27 @@ class OcctKernel:
             edges=tuple(record for record, _ in edge_records),
             deleted=deleted,
         )
+
+    def _cut_took_material(
+        self, lateral: int, source: _Solid, after: TopoDS_Shape, tool: TopoDS_Shape
+    ) -> bool:
+        """Whether a cut took anything away.
+
+        ``lateral`` is how many faces of the *result* came from the tool's swept
+        sides — a number the provenance pass has already worked out. A tool that
+        removed material left some of its own wall behind; a tool that only
+        grazed a face left none, which is exactly the direction mistake this
+        check exists to catch. A positive count is therefore proof, at no cost.
+
+        Only when there is no such proof is the volume difference measured, and
+        then it decides, exactly as it always did. Three whole-body integrations
+        per cut were a fifth of a rebuild here, and on every cut that worked they
+        were confirming what the history map had already said.
+        """
+        if lateral > 0:
+            return True
+        removed = self._volume_of(source) - _volume(after)
+        return removed > _volume(tool) * _CUT_FRACTION
 
     def _lookup_solid(self, handle: SolidHandle) -> _Solid:
         try:
@@ -1056,6 +1165,14 @@ def _sort_key(fingerprint: FaceFingerprint) -> tuple:
     )
 
 
+def _reuse_or_measure(known: _ShapeMap | None, face: TopoDS_Face) -> FaceFingerprint:
+    if known is not None:
+        kept = known.get(face)
+        if isinstance(kept, FaceFingerprint):
+            return kept
+    return _face_fingerprint(face)
+
+
 def _lookup(provenance: _ShapeMap, face: TopoDS_Face) -> FaceProvenance:
     found = provenance.get(face)
     return found if isinstance(found, FaceProvenance) else FaceProvenance(origin=Origin.UNKNOWN)
@@ -1069,25 +1186,42 @@ def _edge_records(
     The edge travels alongside its record so a later blend can act on exactly the
     edge the user selected, rather than re-finding it geometrically.
     """
-    ancestors = TopTools_IndexedDataMapOfShapeListOfShape()
-    TopExp.MapShapesAndAncestors_s(shape, TopAbs_EDGE, TopAbs_FACE, ancestors)
+    # Walked face by face rather than through MapShapesAndAncestors: that map
+    # answers per edge with a TopTools_ListOfShape, and reading 409 two-item
+    # lists out of OCP costs 70ms against 1.2ms for this. The result is the
+    # same edges with the same adjacency.
+    adjacency: dict[int, tuple[TopoDS_Edge, list[Ref]]] = {}
+    order: list[int] = []
+    for face in _faces_of(shape):
+        ref = index_of.get(face)
+        if not isinstance(ref, str):
+            continue
+        explorer = TopExp_Explorer(face, TopAbs_EDGE)
+        while explorer.More():
+            edge = TopoDS.Edge_s(explorer.Current())
+            key = hash(edge)
+            entry = adjacency.get(key)
+            if entry is None:
+                adjacency[key] = (edge, [ref])
+                order.append(key)
+            elif ref not in entry[1]:
+                entry[1].append(ref)
+            explorer.Next()
 
     records: list[tuple[EdgeRecord, TopoDS_Edge]] = []
-    for index in range(1, ancestors.Extent() + 1):
-        edge = TopoDS.Edge_s(ancestors.FindKey(index))
-        refs: list[Ref] = []
-        for shape in _shape_list(ancestors.FindFromIndex(index)):
-            ref = index_of.get(TopoDS.Face_s(shape))
-            if isinstance(ref, str) and ref not in refs:
-                refs.append(ref)
+    for key in order:
+        edge, refs = adjacency[key]
         # A seam edge belongs to one face and carries no two-face identity.
+        if len(refs) < 2:
+            continue
+        fingerprint = _edge_fingerprint(edge)
         for first, second in itertools.combinations(sorted(refs), 2):
             records.append(
                 (
                     EdgeRecord(
                         ref=f"e{len(records)}",
                         faces=(first, second),
-                        fingerprint=_edge_fingerprint(edge),
+                        fingerprint=fingerprint,
                     ),
                     edge,
                 )
