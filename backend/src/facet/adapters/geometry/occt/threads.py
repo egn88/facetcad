@@ -33,6 +33,7 @@ import math
 from OCP.BRep import BRep_Builder
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Common, BRepAlgoAPI_Cut
 from OCP.BRepBuilderAPI import (
+    BRepBuilderAPI_Copy,
     BRepBuilderAPI_MakeEdge,
     BRepBuilderAPI_MakeFace,
     BRepBuilderAPI_MakePolygon,
@@ -67,6 +68,32 @@ SEGMENT_TURNS = 0.5
 RUNOUT_TURNS = 1.5
 
 
+#: Unplaced tools, keyed on the numbers that decide their shape. A thread's
+#: tool depends on its designation, its length and its hand — not on where it
+#: is, which is a transform applied afterwards. So the four M8 cover screws on
+#: a plate are one tool used four times.
+#:
+#: Worth having because this is the expensive half: on an export with every
+#: thread modelled, building tools was 7.0s of a 21.9s rebuild and only three
+#: of the seven were distinct.
+#:
+#: Bounded because a document with many distinct thread lengths would otherwise
+#: accumulate one compound each. Oldest out first; a document has few.
+_TOOL_CACHE: dict[tuple, TopoDS_Shape] = {}
+_TOOL_CACHE_LIMIT = 32
+
+
+def _tool_key(request: ThreadRequest) -> tuple:
+    return (
+        request.major,
+        request.minor,
+        request.pitch,
+        request.length,
+        request.internal,
+        request.right_handed,
+    )
+
+
 def thread_tool(request: ThreadRequest) -> TopoDS_Shape:
     """The solid to subtract in order to leave ``request``'s thread behind."""
     if request.pitch <= 0:
@@ -92,6 +119,23 @@ def thread_tool(request: ThreadRequest) -> TopoDS_Shape:
         )
 
     frame = _axis_frame(request)
+    key = _tool_key(request)
+    cached = _TOOL_CACHE.get(key)
+    if cached is not None:
+        # Copied rather than shared. A boolean may attach internal
+        # representations to its arguments, and two cuts reaching into one
+        # compound is not a thing to find out about later.
+        return _placed(BRepBuilderAPI_Copy(cached).Shape(), frame)
+
+    shape = _build_tool(request)
+    if len(_TOOL_CACHE) >= _TOOL_CACHE_LIMIT:
+        del _TOOL_CACHE[next(iter(_TOOL_CACHE))]
+    _TOOL_CACHE[key] = shape
+    return _placed(BRepBuilderAPI_Copy(shape).Shape(), frame)
+
+
+def _build_tool(request: ThreadRequest) -> TopoDS_Shape:
+    """The tool about the world Z axis, before it is moved onto its own."""
     major_r = request.major / 2.0
     minor_r = request.minor / 2.0
     mid_r = (major_r + minor_r) / 2.0
@@ -123,7 +167,7 @@ def thread_tool(request: ThreadRequest) -> TopoDS_Shape:
         raise FeatureBuildError(
             feature=request.feature, reason="the thread form could not be swept"
         )
-    return _placed(_clipped(compound, request, outer), frame)
+    return _clipped(compound, request, outer)
 
 
 def _clipped(tool: TopoDS_Shape, request: ThreadRequest, outer: float) -> TopoDS_Shape:

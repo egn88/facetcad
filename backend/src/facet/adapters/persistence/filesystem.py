@@ -3,6 +3,13 @@
 YAML rather than JSON because these files are meant to be read and edited by
 hand and reviewed in a diff. Writes are atomic (write to a temporary file, then
 rename) so an interrupted save cannot leave a half-written project behind.
+
+Parsing goes through libyaml when it is installed, which it is in every
+environment this ships in. PyYAML's default loader is pure Python and was
+costing 60ms on a 35-feature document, against 8ms for the C one — and *every*
+request reads the document, so that was the largest single cost in several
+endpoints, ahead of the geometry they existed to serve. The pure-Python loader
+remains the fallback, because a correct answer slowly beats an ImportError.
 """
 
 from __future__ import annotations
@@ -15,6 +22,13 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import yaml
+
+try:  # libyaml, ~8x faster to parse and ~5x to write. Present in every image.
+    from yaml import CSafeDumper as _Dumper
+    from yaml import CSafeLoader as _Loader
+except ImportError:  # pragma: no cover - only where libyaml is absent
+    from yaml import SafeDumper as _Dumper  # type: ignore[assignment]
+    from yaml import SafeLoader as _Loader  # type: ignore[assignment]
 
 from facet.application.ports.repository import (
     ProjectExists,
@@ -94,13 +108,11 @@ class FilesystemDocumentRepository:
         return self._root / f"{project_id}.yaml"
 
     def _read(self, path: Path) -> Document:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        raw = yaml.load(path.read_text(encoding="utf-8"), Loader=_Loader) or {}
         return Document.from_dict(raw)
 
     def _write(self, project_id: str, document: Document, path: Path) -> ProjectSummary:
-        payload = yaml.safe_dump(
-            document.to_dict(), sort_keys=False, default_flow_style=False, allow_unicode=True
-        )
+        payload = _dump(document)
         # Atomic replace: a crash mid-write leaves the previous version intact.
         handle, temporary = tempfile.mkstemp(dir=str(self._root), suffix=".tmp")
         try:
@@ -125,16 +137,24 @@ class FilesystemDocumentRepository:
         )
 
 
+def _dump(document: Document) -> str:
+    return yaml.dump(
+        document.to_dict(),
+        Dumper=_Dumper,
+        sort_keys=False,
+        default_flow_style=False,
+        allow_unicode=True,
+    )
+
+
 def yaml_text(document: Document) -> str:
     """The document's canonical YAML, used by the export and download paths."""
-    return yaml.safe_dump(
-        document.to_dict(), sort_keys=False, default_flow_style=False, allow_unicode=True
-    )
+    return _dump(document)
 
 
 def document_from_yaml(text: str) -> Document:
     try:
-        raw = yaml.safe_load(text) or {}
+        raw = yaml.load(text, Loader=_Loader) or {}
     except yaml.YAMLError as exc:
         raise DocumentError(reason=f"invalid YAML: {exc}") from exc
     return Document.from_dict(raw)

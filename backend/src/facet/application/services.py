@@ -519,7 +519,14 @@ class ProjectService:
         :meth:`enclosure`, which builds a container to put it in.
         """
         self._require(Capability.FACE_PROFILE)
-        result = self.recompute(project_id)
+        return self._flatten(self.recompute(project_id), body, include_blends)
+
+    def _flatten(
+        self,
+        result: RecomputeResult,
+        body: str | None,
+        include_blends: bool,
+    ) -> FlattenResult:
         extractor: ProfileExtractor = self._kernel  # type: ignore[assignment]
 
         profiles: list[Profile2D] = []
@@ -566,7 +573,11 @@ class ProjectService:
         and :meth:`enclosure`, which gives a rectangular box that ignores the
         part's shape.
         """
-        flattened = self.flat_faces(project_id, body, include_blends=False)
+        # One rebuild, used twice. Both halves of this used to ask for their own
+        # -- and a rebuild starts by re-reading the document off disk, which on
+        # a 35-feature model was the largest single cost in the call.
+        rebuilt = self.recompute(project_id)
+        flattened = self._flatten(rebuilt, body, include_blends=False)
         panels = {panel.label: panel for panel in flattened.panels}
         result = joint_faces(
             panels,
@@ -579,12 +590,12 @@ class ProjectService:
                 overrides=dict(overrides or {}),
                 fit=fit,
             ),
-            adjacency=self._edge_adjacency(project_id, body),
+            adjacency=self._edge_adjacency(rebuilt, body),
         )
         return replace(result, panels=tuple(lay_out(list(result.panels))))
 
     def _edge_adjacency(
-        self, project_id: str, body: str | None
+        self, result: RecomputeResult, body: str | None
     ) -> dict[str, tuple[str, str]]:
         """Model edge ref -> the two face tags it separates, *including* blends.
 
@@ -594,7 +605,6 @@ class ProjectService:
         plain sides where a bevel had been. This is the full picture, so the
         joint generator can see through a blend to the faces it sits between.
         """
-        result = self.recompute(project_id)
         adjacency: dict[str, tuple[str, str]] = {}
         for named in self._bodies_for(result, body):
             for edge_tag, ref in named.edge_refs.items():

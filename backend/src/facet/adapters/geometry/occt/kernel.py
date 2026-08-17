@@ -491,6 +491,10 @@ class _Solid:
     fingerprints: dict[Ref, FaceFingerprint] = field(default_factory=dict)
     #: edge ref -> (edge, the two face refs it separates)
     edges: dict[Ref, tuple[TopoDS_Edge, tuple[Ref, Ref]]] = field(default_factory=dict)
+    #: Built on the first `edge_ref` / `face_of` call. A solid is immutable once
+    #: stored, so there is nothing to invalidate.
+    _edge_index: _ShapeMap | None = field(default=None, repr=False)
+    _face_index: dict[Ref, TopoDS_Face] | None = field(default=None, repr=False)
     #: The solid's volume, integrated at most once. A cut measures the body
     #: before and after to prove it removed something, and "after" is the next
     #: feature's "before" -- so without this every feature integrates the whole
@@ -501,16 +505,37 @@ class _Solid:
     #: inherited ones — a padded side is still a side, whichever body it joins.
     provenance: dict[Ref, FaceProvenance] = field(default_factory=dict)
 
+    def face_of(self, ref: Ref) -> TopoDS_Face | None:
+        """The face a ref names.
+
+        Indexed for the same reason as `edge_ref`: flattening asks once per
+        face, so scanning the list made a whole-body flatten quadratic in face
+        count.
+        """
+        if self._face_index is None:
+            self._face_index = dict(self.faces)
+        return self._face_index.get(ref)
+
     def edge_ref(self, edge: TopoDS_Edge) -> str:
         """The ref of a stored edge, by shape identity.
 
         Two faces meeting at an edge report the *same* ref, which is what lets a
         joint generator pair up the panels without matching their geometry.
+
+        Indexed on first use rather than scanned. Flattening a body asks this
+        once per edge of every face — 307 times on a 168-face body, each walking
+        the whole edge map with an ``IsSame`` per entry, which was a quarter of
+        the time a full flatten took. The index is built from the same map and
+        keyed the same way ``_ShapeMap`` is, so it agrees with the scan it
+        replaces by construction.
         """
-        for ref, (stored, _) in self.edges.items():
-            if stored.IsSame(edge):
-                return ref
-        return ""
+        if self._edge_index is None:
+            index = _ShapeMap()
+            for ref, (stored, _) in self.edges.items():
+                index.set(stored, ref)
+            self._edge_index = index
+        found = self._edge_index.get(edge)
+        return found if isinstance(found, str) else ""
 
 
 # --------------------------------------------------------------------------
@@ -1023,10 +1048,10 @@ class OcctKernel:
     ) -> Profile2D:
         """The cut path of one planar face, in that face's own plane."""
         solid = self._lookup_solid(solid_handle)
-        for stored_ref, face in solid.faces:
-            if stored_ref == ref:
-                return face_profile(face, tolerance, label=ref, edge_refs=solid.edge_ref)
-        raise FeatureBuildError(feature="face", reason=f"unknown face '{ref}'")
+        face = solid.face_of(ref)
+        if face is None:
+            raise FeatureBuildError(feature="face", reason=f"unknown face '{ref}'")
+        return face_profile(face, tolerance, label=ref, edge_refs=solid.edge_ref)
 
     def section_profile(
         self, solid_handle: SolidHandle, frame: Frame, tolerance: float = 0.01

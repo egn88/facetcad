@@ -291,3 +291,64 @@ def test_an_unknown_modelled_value_says_what_is_allowed(kernel: OcctKernel) -> N
     assert not result.ok
     message = str(result.failures()[0].error)
     assert "export" in message
+
+
+# -- one tool, many threads -------------------------------------------------
+
+
+def test_identical_threads_build_one_tool(kernel: OcctKernel) -> None:
+    """The expensive half of a thread is its tool, and it does not depend on place.
+
+    Four M8 cover screws are one tool used four times. On an export with every
+    thread modelled, building them was 7.0s of a 21.9s rebuild and three of the
+    seven were distinct.
+    """
+    from facet.adapters.geometry.occt import threads
+
+    threads._TOOL_CACHE.clear()
+    data = copy.deepcopy(BLOCK)
+    for index, (x, y) in enumerate((("w / 4", "h / 4"), ("3 * w / 4", "h / 4"))):
+        data["sketches"]["holes"]["points"][f"t{index}"] = [x, y]  # type: ignore[index]
+        data["features"].append(  # type: ignore[attr-defined]
+            {**TAPPED, "id": f"tap{index}", "at": f"holes.t{index}", "modelled": True}
+        )
+    result = recompute(Document.from_dict(data), kernel)
+
+    assert result.ok, [str(o.error) for o in result.failures()]
+    assert len(threads._TOOL_CACHE) == 1, "same designation and depth, one tool"
+
+
+def test_different_threads_do_not_share_a_tool(kernel: OcctKernel) -> None:
+    """The cache must key on everything that changes the shape."""
+    from facet.adapters.geometry.occt import threads
+
+    threads._TOOL_CACHE.clear()
+    data = copy.deepcopy(BLOCK)
+    data["sketches"]["holes"]["points"]["t1"] = ["3 * w / 4", "h / 2"]  # type: ignore[index]
+    data["features"].append({**TAPPED, "modelled": True})  # type: ignore[attr-defined]
+    data["features"].append(  # type: ignore[attr-defined]
+        {**TAPPED, "id": "m8", "at": "holes.t1", "standard": "M8", "modelled": True}
+    )
+    result = recompute(Document.from_dict(data), kernel)
+
+    assert result.ok, [str(o.error) for o in result.failures()]
+    assert len(threads._TOOL_CACHE) == 2
+
+
+def test_a_cached_tool_cuts_the_same_solid(kernel: OcctKernel) -> None:
+    """A shared tool must not be a differently-shaped one.
+
+    Cut twice from a cold cache and a warm one; the volume removed has to agree,
+    because the second cut is the one reading a tool it did not build.
+    """
+    from facet.adapters.geometry.occt import threads
+
+    threads._TOOL_CACHE.clear()
+    cold = build(kernel, {**TAPPED, "modelled": True})
+    warm = build(kernel, {**TAPPED, "modelled": True})
+
+    assert cold.ok and warm.ok
+    assert base_tags(warm) == base_tags(cold)
+    assert kernel.volume(warm.solid.handle) == pytest.approx(
+        kernel.volume(cold.solid.handle), rel=1e-12
+    )
