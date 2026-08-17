@@ -259,3 +259,68 @@ def test_the_two_detail_levels_do_not_evict_each_other(
     project.mesh("bracket", Detail.FULL)
 
     assert kernel.tessellations == settled
+
+
+# --------------------------------------------------------------------------
+# And the triangles outlive the process, like the solid they came from
+# --------------------------------------------------------------------------
+
+
+def test_a_new_service_does_not_tessellate_again(
+    repository: FilesystemDocumentRepository, store: MemoryStore
+) -> None:
+    """A cold open reads the mesh rather than computing it.
+
+    The solid still has to be restored for anything that touches geometry, but
+    drawing the part does not: the triangles are a pure function of the state
+    the body is in, and that state is what the key says.
+    """
+    service(repository, store).view_state("bracket")
+
+    kernel = CountingKernel()
+    service(repository, store, kernel).view_state("bracket")
+
+    assert kernel.tessellations == 0
+
+
+def test_a_stored_mesh_is_per_detail_level(
+    repository: FilesystemDocumentRepository, store: MemoryStore
+) -> None:
+    first = service(repository, store)
+    first.mesh("bracket", Detail.DRAFT)
+    first.mesh("bracket", Detail.FULL)
+
+    kernel = CountingKernel()
+    second = service(repository, store, kernel)
+    second.mesh("bracket", Detail.DRAFT)
+    second.mesh("bracket", Detail.FULL)
+
+    assert kernel.tessellations == 0
+
+
+def test_an_unreadable_stored_mesh_costs_only_speed(
+    repository: FilesystemDocumentRepository, store: MemoryStore
+) -> None:
+    """Shredded triangles must mean a rebuild, never a wrong picture."""
+    reference = service(repository, store).view_state("bracket")
+    for key in list(store.blobs):
+        store.blobs[key] = b"shredded"
+
+    kernel = CountingKernel()
+    state = service(repository, store, kernel).view_state("bracket")
+
+    assert kernel.tessellations > 0
+    assert state["bodies"] == reference["bodies"]
+
+
+def test_a_service_without_a_store_still_draws(
+    repository: FilesystemDocumentRepository,
+) -> None:
+    kernel = CountingKernel()
+    project = ProjectService(repository, kernel)
+
+    first = project.view_state("bracket")
+    second = project.view_state("bracket")
+
+    assert first["bodies"] == second["bodies"]
+    assert kernel.tessellations == 1

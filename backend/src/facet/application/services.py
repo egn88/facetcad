@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import hashlib
+import pickle
 import sys
 from array import array
 from collections.abc import Mapping, Sequence
@@ -411,14 +413,61 @@ class ProjectService:
         if cached is not None:
             return cached
 
+        stored = self._stored_mesh(key)
+        if stored is not None:
+            self._remember_mesh(key, stored)
+            return stored
+
         mesh = self._kernel.tessellate(solid.handle, self._tolerance)
         self._remember_mesh(key, mesh)
+        self._store_mesh(key, mesh)
         return mesh
 
     def _remember_mesh(self, key: str, mesh: Tessellation) -> None:
         if len(self._meshes) >= self._MESH_CACHE_LIMIT:
             del self._meshes[next(iter(self._meshes))]
         self._meshes[key] = mesh
+
+    # -- triangles that outlive the process --------------------------------
+    #
+    # The same content-hash reasoning as the engine's snapshots, one layer up
+    # and in the same store. Worth its own entry rather than being folded into
+    # the snapshot: meshing a restored body was 91ms of a cold open here, and on
+    # a kernel running out of process the triangles also make the trip back down
+    # the pipe. A body whose mesh is on disk needs neither.
+
+    def _mesh_store_key(self, key: str) -> str:
+        blob = f"mesh/{self._kernel.name}/{key}"
+        return hashlib.sha256(blob.encode()).hexdigest()
+
+    def _stored_mesh(self, key: str) -> Tessellation | None:
+        """A stored mesh for this exact geometry, or None for any reason at all.
+
+        Every failure is a miss, exactly as it is for a snapshot: a missing
+        file, a truncated one, a pickle from a layout that has since changed.
+        Tessellating is always correct, so nothing here is worth raising over.
+        """
+        if self._snapshots is None:
+            return None
+        blob = self._snapshots.load(self._mesh_store_key(key))
+        if blob is None:
+            return None
+        try:
+            mesh = pickle.loads(blob)
+        except Exception:
+            return None
+        return mesh if isinstance(mesh, Tessellation) else None
+
+    def _store_mesh(self, key: str, mesh: Tessellation) -> None:
+        if self._snapshots is None or not mesh.positions:
+            return
+        try:
+            blob = pickle.dumps(mesh, protocol=pickle.HIGHEST_PROTOCOL)
+        except Exception:
+            # The caller already has its triangles; the only cost is meshing
+            # this body again in some later process.
+            return
+        self._snapshots.save(self._mesh_store_key(key), blob)
 
     def _mesh_payload(
         self,
