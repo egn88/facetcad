@@ -68,6 +68,10 @@ SEGMENT_TURNS = 0.5
 RUNOUT_TURNS = 1.5
 
 
+#: Designation, length and hand -- everything that changes the tool's shape, and
+#: nothing that only moves it.
+_ToolKey = tuple[float, float, float, float, bool, bool]
+
 #: Unplaced tools, keyed on the numbers that decide their shape. A thread's
 #: tool depends on its designation, its length and its hand — not on where it
 #: is, which is a transform applied afterwards. So the four M8 cover screws on
@@ -79,11 +83,11 @@ RUNOUT_TURNS = 1.5
 #:
 #: Bounded because a document with many distinct thread lengths would otherwise
 #: accumulate one compound each. Oldest out first; a document has few.
-_TOOL_CACHE: dict[tuple, TopoDS_Shape] = {}
+_TOOL_CACHE: dict[_ToolKey, TopoDS_Shape] = {}
 _TOOL_CACHE_LIMIT = 32
 
 
-def _tool_key(request: ThreadRequest) -> tuple:
+def _tool_key(request: ThreadRequest) -> _ToolKey:
     return (
         request.major,
         request.minor,

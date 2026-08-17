@@ -352,7 +352,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) and [DESIGN.md](DESIGN.md).
 ## Tests
 
 ```bash
-cd backend && .venv/bin/python -m pytest        # 980 tests, ~2.5 min with OCCT installed
+cd backend && .venv/bin/python -m pytest        # 1010 tests, ~2 min with OCCT installed
 cd frontend && npm test                        # 25 tests, chain naming stability
 ```
 
@@ -413,6 +413,33 @@ whole entry if it does not reproduce the fingerprints that were recorded — the
 is guarding against being a selector that quietly resolves to a different face. Everything
 else that can go wrong (a truncated file, a blob from an older layout, a store on a
 read-only volume) is a cache miss, because rebuilding is always correct.
+
+### The first export, not just the second
+
+An export rebuilds at full detail — the threads a viewport skips are cut — and on the
+35-feature model that is about ten seconds. The store above already made the *second*
+export instant. The first one is now warmed in the background: after an edit settles, a
+rebuild at export detail runs on a thread and writes into the same store, so the export a
+user then asks for is a restore. **9.8s to 0.85s**, measured end to end.
+
+It runs a **second** OpenCascade process, and that is the point rather than an
+extravagance. Geometry is serialised — one worker, one pipe, one lock — so warming through
+the foreground kernel would not be background work at all, it would put a ten-second
+rebuild in front of the next click. What makes a second process safe here, where a worker
+*pool* was measured and rejected, is that the two never exchange a handle: a handle names
+memory inside one worker, and these two exchange snapshot bytes through the
+content-addressed store instead.
+
+The process is spawned when there is something to warm and closed when the queue empties,
+so a server nobody is editing runs one kernel. A burst of edits — dragging a slider — is
+one warm, three seconds after the dragging stops. Nothing about it is load-bearing: a
+warm that fails, is superseded, or never runs costs the next export the rebuild it would
+have done anyway.
+
+`FACET_WARM=off` turns it off. It also declines to exist without a snapshot store (there
+would be nowhere to put the result) and without `FACET_GEOMETRY_ISOLATION`, because an
+in-process kernel on a background thread holds the interpreter lock for the whole rebuild
+— the exact freeze the child process exists to prevent.
 
 `FACET_CACHE` points the store somewhere other than `<FACET_DATA>/../snapshots`, and
 `FACET_CACHE=off` turns it off. The directory is derived data and safe to delete at any

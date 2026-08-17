@@ -24,7 +24,10 @@ except ImportError:  # pragma: no cover - depends on which extras are present
 from facet.adapters.http import api
 from facet.adapters.persistence.filesystem import FilesystemDocumentRepository
 from facet.adapters.persistence.snapshots import FilesystemSnapshotStore
+from facet.adapters.warming import BackgroundWarmer, NoWarming
 from facet.application.ports.geometry import GeometryKernel
+from facet.application.ports.snapshots import SnapshotStore
+from facet.application.ports.warming import Warmer
 from facet.application.services import ProjectService
 
 DESCRIPTION = """
@@ -63,12 +66,7 @@ def build_kernel() -> GeometryKernel:
     and saves 5-8% on a rebuild. Worth it only for a benchmark.
     """
     requested = os.environ.get("FACET_KERNEL", "auto").lower()
-    isolate = os.environ.get("FACET_GEOMETRY_ISOLATION", "on").lower() not in (
-        "off",
-        "0",
-        "false",
-        "no",
-    )
+    isolate = _isolated()
 
     if requested in ("auto", "occt"):
         try:
@@ -85,6 +83,16 @@ def build_kernel() -> GeometryKernel:
     from facet.adapters.geometry.fake import FakeKernel
 
     return FakeKernel()
+
+
+def _isolated() -> bool:
+    """Whether geometry runs in a child process. See :func:`build_kernel`."""
+    return os.environ.get("FACET_GEOMETRY_ISOLATION", "on").lower() not in (
+        "off",
+        "0",
+        "false",
+        "no",
+    )
 
 
 def build_service() -> ProjectService:
@@ -110,8 +118,9 @@ def build_service() -> ProjectService:
             Path(configured) if configured else root.parent / "snapshots"
         )
 
+    repository = FilesystemDocumentRepository(root)
     service = ProjectService(
-        FilesystemDocumentRepository(root), kernel, snapshots=snapshots
+        repository, kernel, snapshots=snapshots, warmer=_build_warmer(repository, snapshots)
     )
     # When a wedged worker is killed, every cached solid handle refers to memory
     # that no longer exists — and the replacement reuses the same ids for
@@ -120,6 +129,39 @@ def build_service() -> ProjectService:
     if set_hook is not None:
         set_hook(service.invalidate_caches)
     return service
+
+
+def _build_warmer(
+    repository: FilesystemDocumentRepository, snapshots: SnapshotStore | None
+) -> Warmer:
+    """Prepare export geometry out of band, when there is somewhere to put it.
+
+    Pointless without a snapshot store — the whole mechanism is "build it now,
+    find it later" — so it follows FACET_CACHE off.
+
+    It runs a *second* geometry kernel, because the first is serialised: one
+    worker, one pipe, one lock, so warming through it would put a nine-second
+    rebuild in front of the next click. The two never exchange a handle, only
+    snapshot bytes, which is why this is safe where sharding solids across a
+    worker pool was not.
+
+    The second process is spawned when there is something to warm and closed
+    when the queue empties, so a server nobody is editing runs one kernel.
+    ``FACET_WARM=off`` turns it off for a deployment that would rather not spend
+    the memory at all.
+    """
+    if snapshots is None:
+        return NoWarming()
+    if os.environ.get("FACET_WARM", "").strip().lower() in ("off", "0", "false", "no"):
+        return NoWarming()
+    if not _isolated():
+        # Without isolation `build_kernel` hands back an in-process kernel, and a
+        # background thread calling into OpenCascade holds the interpreter lock
+        # for the whole rebuild — which is the exact freeze the child process
+        # exists to prevent, except now on a thread nobody asked for. Warming is
+        # an optimisation and is not worth reintroducing it.
+        return NoWarming()
+    return BackgroundWarmer(repository, snapshots, build_kernel)
 
 
 def create_app(service: ProjectService | None = None) -> FastAPI:

@@ -85,6 +85,7 @@ mesh kernel, a B-rep kernel, or the fake kernel all feed the same naming engine.
 |---|---|---|
 | `DocumentRepository` | Load/save/list project documents | filesystem (YAML) |
 | `SnapshotStore` | Keep built geometry between runs, by content hash | filesystem (binary) |
+| `Warmer` | Prepare export-detail geometry before it is asked for | background thread + a second kernel |
 | `MeshExporter` | STL (binary and ASCII), OBJ | OCCT, analytic |
 | `BrepExporter` | STEP | OCCT only — `Capability` guarded |
 | `DrawingExporter` | DXF / SVG, as planar sections | OCCT only — `Capability` guarded |
@@ -115,10 +116,10 @@ exactly, in pure Python. It exists for three reasons:
 1. **It proves the port is real.** A port with one implementation is a guess. Two force
    the abstraction to be honest, and any leak of OCCT concepts into `application` shows up
    immediately as a compile-time hole in the fake.
-2. **Test speed.** With OCCT absent entirely, 665 of the 980 backend tests still run — the
+2. **Test speed.** With OCCT absent entirely, 692 of the 1010 backend tests still run — the
    naming, selector, recompute and snapshot suites, which are the ones that fail first when
-   the tag algebra is wrong — and they finish in about thirty-six seconds against the two
-   and a half minutes the full suite takes. The parameter sweeps are among the 315 that drop
+   the tag algebra is wrong — and they finish in about eighteen seconds against the two
+   minutes the full suite takes. The parameter sweeps are among the 318 that drop
    out, deliberately: a stability proof has to run on the kernel that ships.
 3. **Bisecting failures.** When a model misbehaves, running it against both kernels
    answers "is this our naming layer or the kernel?" in one command.

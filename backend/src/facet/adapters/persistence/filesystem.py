@@ -27,8 +27,8 @@ try:  # libyaml, ~8x faster to parse and ~5x to write. Present in every image.
     from yaml import CSafeDumper as _Dumper
     from yaml import CSafeLoader as _Loader
 except ImportError:  # pragma: no cover - only where libyaml is absent
-    from yaml import SafeDumper as _Dumper  # type: ignore[assignment]
-    from yaml import SafeLoader as _Loader  # type: ignore[assignment]
+    from yaml import SafeDumper as _Dumper
+    from yaml import SafeLoader as _Loader
 
 from facet.application.ports.repository import (
     ProjectExists,

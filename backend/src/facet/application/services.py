@@ -11,6 +11,7 @@ rebuilds only the affected features rather than the whole history.
 from __future__ import annotations
 
 import base64
+import contextlib
 import sys
 from array import array
 from collections.abc import Mapping, Sequence
@@ -50,6 +51,7 @@ from .ports.geometry import (
 )
 from .ports.repository import DocumentRepository, ProjectSummary
 from .ports.snapshots import SnapshotStore
+from .ports.warming import Warmer
 from .recompute import Detail, RecomputeEngine, RecomputeResult
 
 #: How finely a free-form curve is approximated when flattened for cutting (mm).
@@ -98,6 +100,7 @@ class ProjectService:
         *,
         tessellation_tolerance: float = 0.1,
         snapshots: SnapshotStore | None = None,
+        warmer: Warmer | None = None,
     ) -> None:
         self._repository = repository
         self._kernel = kernel
@@ -106,6 +109,10 @@ class ProjectService:
         # geometry an earlier run left behind. Optional: without it the engines
         # behave exactly as they did, cold on every start.
         self._snapshots = snapshots
+        # Told when a project has changed, so export-detail geometry can be
+        # ready before anyone asks. Never waited on: it saves time and is not
+        # allowed to be load-bearing.
+        self._warmer = warmer
         self._engines: dict[str, RecomputeEngine] = {}
         # Triangles, keyed by the solid they came from. A mesh is a pure function
         # of a solid and a tolerance, and a solid that has not been rebuilt keeps
@@ -814,6 +821,9 @@ class ProjectService:
         """
         document = self._repository.load(project_id)
         result = self._engine(project_id).recompute(document)
+        # Opening a document and exporting it is as common as editing one and
+        # exporting it, and a warm that is already done costs a restore.
+        self._warm(project_id)
         return {
             "document": document.to_dict(),
             # Packed here and nowhere else. /bodies and /mesh keep plain numbers
@@ -880,7 +890,22 @@ class ProjectService:
         """
         document.validate()
         self._repository.save(project_id, document)
-        return self._engine(project_id).recompute(document)
+        result = self._engine(project_id).recompute(document)
+        self._warm(project_id)
+        return result
+
+    def _warm(self, project_id: str) -> None:
+        """Ask for export-detail geometry to be prepared, if anything will.
+
+        On the request path, so it must not raise. A warmer that throws here
+        would turn a saved edit into a failed one.
+        """
+        if self._warmer is None:
+            return
+        # Suppressed rather than logged: a warmer is not allowed to matter, and
+        # the one that ships already swallows its own failures.
+        with contextlib.suppress(Exception):
+            self._warmer.schedule(project_id)
 
 
 #: Marks a payload whose coordinate arrays are base64 rather than numbers, so a
@@ -932,7 +957,7 @@ def _floats(values: Sequence[float], packed: bool) -> object:
     return _packed(array("f", values))
 
 
-def _packed(values: array) -> str:
+def _packed(values: array[float] | array[int]) -> str:
     if not _LITTLE_ENDIAN:  # pragma: no cover - no big-endian machine to run on
         values.byteswap()
     return base64.b64encode(values.tobytes()).decode("ascii")
