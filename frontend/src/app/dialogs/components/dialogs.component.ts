@@ -371,20 +371,20 @@ export class DocumentEditorComponent {
             </div>
           </div>
           <div class="field">
-            <label class="checkbox">
-              <input
-                type="checkbox"
-                [checked]="modelled()"
-                (change)="modelled.set($any($event.target).checked)"
-              />
-              <span>Model the helix</span>
-              <span class="state" [class.on]="modelled()">{{ modelledState() }}</span>
-            </label>
+            <label>Helix</label>
+            <select [value]="modelled()" (change)="modelled.set($any($event.target).value)">
+              <option value="export" [selected]="modelled() === 'export'">
+                exported files only
+              </option>
+              <option value="true" [selected]="modelled() === 'true'">always</option>
+              <option value="false" [selected]="modelled() === 'false'">never — a note</option>
+            </select>
             <div class="consequence">{{ modelledConsequence() }}</div>
             <div class="hint">
-              A note is what a machinist wants, and what every CAD system does.
-              Model the helix for a printed or rendered thread — it adds a few
-              seconds to this feature's rebuild and about ninety faces.
+              Cutting the helix costs a few seconds and about ninety faces, and on
+              screen a threaded hole looks the same either way — so the default
+              pays for it where it matters and not where it does not. A note is
+              what a machinist wants; a printed part needs the geometry.
             </div>
           </div>
         }
@@ -535,25 +535,39 @@ export class AddFeatureComponent {
   readonly onFailure = signal('fail');
   readonly internal = signal('true');
   readonly hand = signal('right');
-  readonly modelled = signal(false);
+  /**
+   * Tri-state, and defaulting to 'export'.
+   *
+   * This was a checkbox, which could only say always or never — and unticking
+   * it wrote no key at all, so the thread was absent from exported STLs too.
+   * That reads as a bug rather than a setting: someone turning off a *render*
+   * option does not expect it to strip geometry from their print file.
+   */
+  readonly modelled = signal('export');
   readonly error = signal<string | null>(null);
 
   readonly editing = computed(() => this.editingFeature() !== null);
 
   /**
-   * What the helix checkbox currently means, spelled out.
+   * What the current choice means, spelled out.
    *
-   * "Model the helix" reads as a description of what a thread feature does, so
-   * leaving it off was reported as missing geometry rather than recognised as
-   * the default. The default stays — the consequence is stated instead.
+   * Each of the three does something different to what reaches a printer, and
+   * that is the part worth stating: the viewport looks identical in two of
+   * them, so the screen cannot tell you which you picked.
    */
-  readonly modelledState = computed(() => (this.modelled() ? 'helix cut' : 'note only'));
-  readonly modelledConsequence = computed(() =>
-    this.modelled()
-      ? 'The helix is cut into the part.'
-      : 'The hole is drilled at the tap-drill size and the thread is a note only — ' +
-        'no thread geometry appears in the model.',
-  );
+  readonly modelledConsequence = computed(() => {
+    switch (this.modelled()) {
+      case 'true':
+        return 'Cut everywhere — in exported files and in the viewport. Slower to rebuild.';
+      case 'false':
+        return (
+          'Never cut. The hole is drilled at the tap-drill size and the thread is a ' +
+          'note only — no thread geometry in the viewport or in exported files.'
+        );
+      default:
+        return 'Cut into exported files, skipped in the viewport — so rebuilds stay quick.';
+    }
+  });
 
   /** Which set of fields this feature type needs. */
   readonly kind = computed(() => {
@@ -642,7 +656,12 @@ export class AddFeatureComponent {
         this.direction.set(text(feature['direction']) || '-normal');
         this.internal.set(feature['internal'] === false ? 'false' : 'true');
         this.hand.set(text(feature['hand']) === 'left' ? 'left' : 'right');
-        this.modelled.set(feature['modelled'] === true);
+        // An absent key means the document predates the tri-state, where the
+        // default was 'never'. Preserve that rather than silently changing an
+        // existing part.
+        this.modelled.set(
+          feature['modelled'] === undefined ? 'false' : String(feature['modelled']),
+        );
         break;
 
       case 'blend':
@@ -683,7 +702,12 @@ export class AddFeatureComponent {
         spec['depth'] = numeric(this.size());
         spec['direction'] = this.direction();
         spec['internal'] = this.internal() === 'true';
-        if (this.modelled()) spec['modelled'] = true;
+        // Written even when it is the default: the value decides whether a
+        // print file has a thread in it, and that should be visible in the
+        // document rather than implied by an absent key.
+        spec['modelled'] = this.modelled() === 'true' ? true
+          : this.modelled() === 'false' ? false
+          : 'export';
         if (this.hand() === 'left') spec['hand'] = 'left';
         break;
 
