@@ -114,6 +114,21 @@ export interface BodiesPayload {
   build: BuildResult;
 }
 
+/**
+ * Everything needed to draw a project, from one rebuild.
+ *
+ * The four separate reads this replaces each re-parsed the document and three
+ * of them each entered the recompute engine, so most of the work was answering
+ * a question that had already been answered.
+ */
+export interface ViewState {
+  document: CadDocument;
+  bodies: BodyMesh[];
+  topologies: TopologiesPayload;
+  sketches: SketchGeometry;
+  build: BuildResult;
+}
+
 export interface BodyOutcome {
   id: string;
   ok: boolean;

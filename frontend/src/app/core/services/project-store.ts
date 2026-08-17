@@ -439,23 +439,25 @@ export class ProjectStore {
     await this.reload();
   }
 
-  /** Pull everything a rebuild can change, in one round trip set. */
+  /**
+   * Pull everything a rebuild can change, in one request.
+   *
+   * This was four parallel reads — document, bodies, topologies, sketches. They
+   * looked concurrent and were not: three of them entered the recompute engine,
+   * which serialises rebuilds of a project, and all four re-read the document.
+   * One endpoint assembles the lot from a single rebuild.
+   */
   async reload(): Promise<void> {
     const id = this.projectId();
     if (!id) return;
     this.busy.set(true);
     try {
-      const [document, payload, topology, sketches] = await Promise.all([
-        this.api.getDocument(id),
-        this.api.bodies(id),
-        this.api.topologies(id),
-        this.api.sketchGeometry(id),
-      ]);
-      this.document.set(document);
-      this.bodyMeshes.set(payload.bodies);
-      this.topologies.set(topology.bodies);
-      this.sketchGeometry.set(sketches);
-      this.build.set(payload.build);
+      const state = await this.api.viewState(id);
+      this.document.set(state.document);
+      this.bodyMeshes.set(state.bodies);
+      this.topologies.set(state.topologies.bodies);
+      this.sketchGeometry.set(state.sketches);
+      this.build.set(state.build);
     } catch (error) {
       this.notify(describe(error), true);
     } finally {
@@ -473,8 +475,9 @@ export class ProjectStore {
 
     this.busy.set(true);
     try {
+      // The mutation rebuilds and reports; reload() then reads that same
+      // rebuild back out of the cache rather than causing another.
       const result = await this.api.setParameters(id, { [name]: value });
-      this.build.set(result);
       await this.reload();
       if (!result.ok) this.notify(`${name} applied, but the model does not build`, true);
     } catch (error) {

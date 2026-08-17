@@ -26,6 +26,7 @@ import type {
   SketchGeometry,
   TopologiesPayload,
   TopologyPayload,
+  ViewState,
 } from '../models/cad.models';
 
 const BASE = '/api';
@@ -196,6 +197,11 @@ export class CadApiService {
     return firstValueFrom(
       this.http.post<BuildResult>(`${BASE}/projects/${id}/recompute${query}`, {}),
     );
+  }
+
+  /** Document, bodies, topologies and sketches together, from one rebuild. */
+  viewState(id: string): Promise<ViewState> {
+    return firstValueFrom(this.http.get<ViewState>(`${BASE}/projects/${id}/state`));
   }
 
   /** Every body, tessellated in its own coordinates with its placement. */

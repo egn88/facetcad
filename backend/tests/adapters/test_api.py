@@ -495,3 +495,91 @@ def test_expression_vocabulary_is_published(client: TestClient) -> None:
     assert "min" in body["functions"]
     assert "pi" in body["constants"]
     assert "plate_w" not in body["functions"]
+
+
+# --------------------------------------------------------------------------
+# The whole view, in one request
+# --------------------------------------------------------------------------
+#
+# A client that draws a project needs the document, the meshes, the names and
+# the sketches. Asking for those separately meant four requests of which three
+# entered the recompute engine and all four re-parsed the document — and after
+# an edit, five, because the mutation had rebuilt and had its answer discarded.
+
+
+def test_state_carries_everything_the_viewport_needs(bracket_client: TestClient) -> None:
+    response = bracket_client.get("/api/projects/bracket/state")
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    assert set(body) == {"document", "bodies", "topologies", "sketches", "build"}
+    assert body["build"]["ok"]
+    assert body["document"]["project"] == "Bracket"
+    assert body["bodies"] and body["bodies"][0]["positions"]
+    assert body["topologies"]["bodies"][0]["faces"]
+    assert body["sketches"]["sketches"]
+
+
+def test_state_agrees_with_the_endpoints_it_replaces(bracket_client: TestClient) -> None:
+    """The old four still exist; this must not be a second, divergent answer.
+
+    Per-feature *status* is deliberately not compared. Whichever call runs first
+    reports `built` and the rest report `cached`, which is the caching working
+    rather than a disagreement about the model.
+    """
+    state = bracket_client.get("/api/projects/bracket/state").json()
+
+    assert state["document"] == bracket_client.get("/api/projects/bracket/document").json()
+    bodies = bracket_client.get("/api/projects/bracket/bodies").json()
+    assert state["bodies"] == bodies["bodies"]
+    assert state["build"]["ok"] == bodies["build"]["ok"]
+    assert state["build"]["parameters"] == bodies["build"]["parameters"]
+    assert [f["id"] for f in state["build"]["features"]] == [
+        f["id"] for f in bodies["build"]["features"]
+    ]
+    assert state["topologies"] == bracket_client.get("/api/projects/bracket/topologies").json()
+    assert (
+        state["sketches"]
+        == bracket_client.get("/api/projects/bracket/sketches/geometry").json()
+    )
+
+
+def test_state_rebuilds_once(tmp_path: Path) -> None:
+    """The reason the endpoint exists, asserted rather than assumed."""
+
+    class CountingKernel(FakeKernel):
+        pads = 0
+
+        def pad(self, request):  # type: ignore[no-untyped-def]
+            type(self).pads += 1
+            return super().pad(request)
+
+    CountingKernel.pads = 0
+    service = ProjectService(FilesystemDocumentRepository(tmp_path), CountingKernel())
+    client = TestClient(create_app(service))
+    client.post("/api/projects", json={"id": "b", "name": "B", "document": BRACKET})
+    assert CountingKernel.pads == 0, "creating a project does not build it"
+
+    assert client.get("/api/projects/b/state").status_code == 200
+    assert CountingKernel.pads == 1, "one response, one rebuild"
+
+    assert client.get("/api/projects/b/state").status_code == 200
+    assert CountingKernel.pads == 1, "and the second is served from the cache"
+
+
+def test_state_reports_a_broken_model_rather_than_failing(bracket_client: TestClient) -> None:
+    """A document mid-edit is the one you most need to look at."""
+    response = bracket_client.patch(
+        "/api/projects/bracket/parameters", json={"changes": {"plate_t": 0}}
+    )
+    assert response.status_code in (200, 422)
+
+    body = bracket_client.get("/api/projects/bracket/state").json()
+    assert body["build"]["ok"] is False
+    # The sketches are still drawable, which is the point of keeping them
+    # independent of the feature history.
+    assert body["sketches"]["sketches"]
+
+
+def test_state_of_an_unknown_project_is_a_404(client: TestClient) -> None:
+    assert client.get("/api/projects/nope/state").status_code == 404

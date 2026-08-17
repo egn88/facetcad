@@ -352,7 +352,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) and [DESIGN.md](DESIGN.md).
 ## Tests
 
 ```bash
-cd backend && .venv/bin/python -m pytest        # 975 tests, ~2.5 min with OCCT installed
+cd backend && .venv/bin/python -m pytest        # 980 tests, ~2.5 min with OCCT installed
 cd frontend && npm test                        # 25 tests, chain naming stability
 ```
 

@@ -571,6 +571,25 @@ def sketch_geometry(project_id: str) -> dict[str, object]:
         raise _fail(error) from error
 
 
+@router.get(
+    "/projects/{project_id}/state",
+    summary="Document, bodies, topologies and sketches in one response",
+)
+def view_state(project_id: str) -> dict[str, object]:
+    """Everything needed to draw the project, from a single rebuild.
+
+    The four endpoints this replaces are still here and still work. This one
+    exists because a client that needs all of them was making four requests
+    where three re-entered the recompute engine and all four re-read the
+    document off disk — and after an edit, five, since the mutation had already
+    rebuilt and had its answer discarded.
+    """
+    try:
+        return service().view_state(project_id)
+    except Exception as error:
+        raise _fail(error) from error
+
+
 @router.get("/projects/{project_id}/bodies", summary="Every body, tessellated")
 def body_meshes(project_id: str) -> dict[str, object]:
     """Per-body geometry with placements, for drawing an assembly."""

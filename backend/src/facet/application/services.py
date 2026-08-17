@@ -340,6 +340,9 @@ class ProjectService:
         so an assembly can later drive it per frame.
         """
         result = self.recompute(project_id)
+        return self._mesh_payload(result), result
+
+    def _mesh_payload(self, result: RecomputeResult) -> list[dict[str, object]]:
         meshes: list[dict[str, object]] = []
 
         for body in result.bodies:
@@ -377,11 +380,13 @@ class ProjectService:
                     ],
                 }
             )
-        return meshes, result
+        return meshes
 
     def body_topologies(self, project_id: str) -> dict[str, object]:
         """Every body's named faces and edges, keyed by body."""
-        result = self.recompute(project_id)
+        return self._topology_payload(self.recompute(project_id))
+
+    def _topology_payload(self, result: RecomputeResult) -> dict[str, object]:
         return {
             "bodies": [
                 {"id": body.id, **body.topology.to_dict()} for body in result.bodies
@@ -720,7 +725,9 @@ class ProjectService:
         parameters and datums directly and reports per-sketch errors rather
         than failing as a whole.
         """
-        document = self._repository.load(project_id)
+        return self._sketch_payload(self._repository.load(project_id))
+
+    def _sketch_payload(self, document: Document) -> dict[str, object]:
         try:
             parameters = document.parameters.resolve()
             frames = document.datums.resolve_all(parameters)
@@ -743,6 +750,31 @@ class ProjectService:
                 continue
             sketches.append(_sketch_payload(identifier, sketch, frame, parameters))
         return {"sketches": sketches, "error": None}
+
+    # -- the whole view, once ----------------------------------------------
+
+    def view_state(self, project_id: str) -> dict[str, object]:
+        """Everything a client needs to draw the project, from one rebuild.
+
+        Assembled here rather than by a client calling four endpoints, which is
+        what it was doing: read the document, read the bodies, read the
+        topologies, read the sketches. Each of the last three entered the
+        recompute engine on its own and each re-parsed the document off disk, so
+        three quarters of the work was answering a question already answered —
+        and an edit paid for it twice over, because the mutation had rebuilt and
+        had its result thrown away before any of them ran.
+
+        One load, one rebuild, one response.
+        """
+        document = self._repository.load(project_id)
+        result = self._engine(project_id).recompute(document)
+        return {
+            "document": document.to_dict(),
+            "bodies": self._mesh_payload(result),
+            "topologies": self._topology_payload(result),
+            "sketches": self._sketch_payload(document),
+            "build": result.to_dict(),
+        }
 
     # -- selector preview --------------------------------------------------
 
