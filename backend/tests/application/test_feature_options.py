@@ -1,4 +1,4 @@
-"""Unknown feature options are refused, not ignored.
+"""Unknown feature options are surfaced, never silently dropped.
 
 The whole system is built on failing loudly rather than guessing: a selector
 that no longer resolves stops the build instead of binding to whatever is
@@ -12,7 +12,12 @@ from __future__ import annotations
 
 import pytest
 
-from facet.application.features import Option, describe_types, validate_options
+from facet.application.features import (
+    Option,
+    describe_types,
+    unknown_options,
+    validate_options,
+)
 from facet.domain.errors import FeatureBuildError
 from facet.domain.features import FeatureSpec
 
@@ -103,3 +108,49 @@ def test_option_carries_a_description() -> None:
     for row in describe_types():
         for option in row["options"]:  # type: ignore[union-attr]
             assert option["describe"], f"{row['type']}.{option['name']} has no description"
+
+
+# -- loud, but not retroactively destructive -------------------------------
+#
+# The first version of this refused unknown options on the *rebuild* path. That
+# broke three working parts on a live server: they had been saved with a key the
+# handler ignored, so the geometry had always been correct, and suddenly every
+# rebuild failed and everything downstream was skipped. The rule now depends on
+# what is happening — refuse when a feature is being written, warn when an
+# existing document is being rebuilt.
+
+
+def test_writing_a_feature_with_an_unknown_option_is_refused() -> None:
+    """At the point of the mistake, where the caller can still fix it."""
+    with pytest.raises(FeatureBuildError) as caught:
+        validate_options(spec("hole", at="s.p", through=True))
+    assert "does not take 'through'" in str(caught.value)
+    assert "Remove it or correct it" in str(caught.value)
+
+
+def test_rebuilding_reports_it_without_refusing() -> None:
+    """`unknown_options` is the same knowledge, without the refusal.
+
+    The rebuild path uses this so a document saved before the check existed still
+    builds, and says what it is ignoring.
+    """
+    reported = unknown_options(spec("hole", at="s.p", through=True))
+    assert reported is not None
+    assert "does not take 'through'" in reported
+    assert "through_all" in reported
+
+
+def test_nothing_is_reported_when_every_key_is_known() -> None:
+    assert unknown_options(spec("hole", at="s.p", through_all=True)) is None
+
+
+def test_the_report_carries_no_consequence_of_its_own() -> None:
+    """Two callers, two consequences — so the shared text states neither.
+
+    One ignores the key and one refuses it; if this sentence said 'is ignored'
+    the refusal would be a lie, which it briefly was.
+    """
+    reported = unknown_options(spec("pad", length=5, bogus=1))
+    assert reported is not None
+    assert "ignored" not in reported
+    assert "Remove it" not in reported

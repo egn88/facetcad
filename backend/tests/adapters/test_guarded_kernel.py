@@ -17,7 +17,12 @@ import pytest
 
 pytest.importorskip("OCP", reason="requires the optional OCCT extra")
 
-from facet.adapters.geometry.guarded import GuardedKernel, KernelRestarted, KernelTimeout
+from facet.adapters.geometry.guarded import (
+    GuardedKernel,
+    KernelBusy,
+    KernelRestarted,
+    KernelTimeout,
+)
 from facet.application.ports.geometry import (
     BlendRequest,
     Capability,
@@ -162,5 +167,81 @@ def test_releasing_a_stale_handle_is_not_an_error() -> None:
         with pytest.raises(KernelTimeout):
             guarded.tessellate(stale, 1e-7)
         guarded.release(stale)  # must not raise
+    finally:
+        guarded.close()
+
+
+# -- concurrency -----------------------------------------------------------
+
+
+def test_concurrent_callers_do_not_corrupt_the_protocol() -> None:
+    """One worker, one pipe, and FastAPI serves sync endpoints from a threadpool.
+
+    Without serialising, two requests interleave their writes and each reads the
+    other's reply. Measured before the lock existed: four concurrent callers,
+    four protocol failures. This is the regression test for that.
+    """
+    import threading
+
+    guarded = GuardedKernel("occt", timeout=30.0)
+    try:
+        assert guarded.name  # start the worker before the threads race for it
+        failures: list[str] = []
+        wrong: list[tuple[float, float]] = []
+
+        def hammer(size: float) -> None:
+            expected = size * size * 10.0
+            try:
+                for _ in range(6):
+                    result = guarded.pad(
+                        PadRequest(feature="p", profile=square(size), length=10.0)
+                    )
+                    # Each thread checks it got *its own* answer back. A crossed
+                    # reply shows up here as another thread's volume.
+                    got = guarded.volume(result.solid)
+                    if abs(got - expected) > 1.0:
+                        wrong.append((expected, got))
+            except Exception as caught:  # reported, not raised, so all threads finish
+                failures.append(f"{type(caught).__name__}: {caught}")
+
+        threads = [threading.Thread(target=hammer, args=(s,)) for s in (10.0, 20.0, 30.0, 40.0)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=120)
+
+        assert failures == []
+        assert wrong == []
+    finally:
+        guarded.close()
+
+
+def test_waiting_too_long_for_a_busy_worker_is_refused_not_queued() -> None:
+    """An unbounded queue is how a server falls over while looking healthy."""
+    import threading
+
+    guarded = GuardedKernel("occt", timeout=30.0, queue_wait=0.1)
+    try:
+        solid = rounded_block(guarded).solid
+        busy: list[BaseException] = []
+        started = threading.Event()
+
+        def occupy() -> None:
+            started.set()
+            guarded.tessellate(solid, 1e-7)  # seconds of work
+
+        holder = threading.Thread(target=occupy)
+        holder.start()
+        started.wait(timeout=5)
+        time.sleep(0.2)  # let it actually take the lock
+
+        try:
+            guarded.volume(solid)
+        except KernelBusy as caught:
+            busy.append(caught)
+        holder.join(timeout=120)
+
+        assert busy, "a caller waited indefinitely instead of being refused"
+        assert "one rebuild runs at a time" in str(busy[0])
     finally:
         guarded.close()

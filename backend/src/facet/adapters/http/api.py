@@ -166,8 +166,17 @@ class DocumentPayload(BaseModel):
 def _fail(error: Exception) -> HTTPException:
     # Imported here: the guarded kernel is optional, and the API must still
     # start when geometry runs in-process.
-    from facet.adapters.geometry.guarded import KernelRestarted, KernelTimeout
+    from facet.adapters.geometry.guarded import KernelBusy, KernelRestarted, KernelTimeout
 
+    if isinstance(error, KernelBusy):
+        # 503 with Retry-After: the request never ran, and will probably work in
+        # a moment. Saying so is what stops a client retrying immediately and
+        # making the queue it is waiting on longer.
+        return HTTPException(
+            status_code=503,
+            detail={"message": str(error)},
+            headers={"Retry-After": "5"},
+        )
     if isinstance(error, KernelTimeout):
         # 503 rather than 500: the server is fine and the request may well
         # succeed on a simpler model, which is what Retry-After-less 503 means.
@@ -490,9 +499,23 @@ def reorder_features(project_id: str, payload: ReorderPayload) -> dict[str, obje
 
 
 @router.post("/projects/{project_id}/recompute", summary="Rebuild and report per feature")
-def recompute(project_id: str) -> dict[str, object]:
+def recompute(
+    project_id: str,
+    force: bool = Query(
+        default=False,
+        description=(
+            "Discard every cached feature first, so the whole history is rebuilt "
+            "from scratch. The cache is keyed on content and should never be "
+            "wrong, so this is a way out of a state that should not happen "
+            "rather than part of normal use."
+        ),
+    ),
+) -> dict[str, object]:
     try:
-        return service().recompute(project_id).to_dict()
+        api = service()
+        if force:
+            api.invalidate_caches()
+        return api.recompute(project_id).to_dict()
     except Exception as error:
         raise _fail(error) from error
 

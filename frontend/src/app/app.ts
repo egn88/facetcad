@@ -115,6 +115,13 @@ type Dialog =
         <button [disabled]="!store.projectId()" (click)="dialog.set('document')">
           Source <span class="badge">E</span>
         </button>
+        <button
+          title="Rebuild every feature from scratch, ignoring the cache"
+          [disabled]="!store.projectId() || store.busy()"
+          (click)="store.forceRebuild()"
+        >
+          Rebuild
+        </button>
 
         <span class="spacer"></span>
 

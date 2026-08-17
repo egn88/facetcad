@@ -36,7 +36,13 @@ from facet.domain.math3d import Frame
 from facet.domain.parameters import ResolvedParameters
 from facet.domain.topology import TopologyIndex
 
-from .features import BlendSkipped, BuildContext, FeatureBuild, handler_for
+from .features import (
+    BlendSkipped,
+    BuildContext,
+    FeatureBuild,
+    handler_for,
+    unknown_options,
+)
 from .naming import NamedSolid, NamingEngine
 from .ports.geometry import GeometryKernel
 
@@ -64,6 +70,10 @@ class FeatureOutcome:
     type: str
     status: str
     error: FacetCADError | None = None
+    #: Things worth saying about a feature that still built. An option the type
+    #: does not read lands here: it is ignored, which is exactly the silence
+    #: that made a counterbore on a pad so expensive to diagnose.
+    warnings: tuple[str, ...] = ()
     face_count: int = 0
     duration_ms: float = 0.0
 
@@ -82,6 +92,7 @@ class FeatureOutcome:
             "status": self.status,
             "faceCount": self.face_count,
             "error": self.error.as_dict() if self.error else None,
+            "warnings": list(self.warnings),
         }
 
 
@@ -278,6 +289,9 @@ class RecomputeEngine:
                 )
                 continue
 
+            ignored = unknown_options(spec)
+            notes = (f"{ignored} — the extra key is ignored.",) if ignored else ()
+
             key = self._cache_key(spec, document, parameters, frames, upstream_key)
             # Namespaced by detail as well as by body: a session alternates
             # between drawing the viewport and writing an STL, and letting one
@@ -293,6 +307,7 @@ class RecomputeEngine:
                         id=spec.id,
                         type=spec.type,
                         status=FeatureStatus.CACHED,
+                        warnings=notes,
                         face_count=len(current.topology.faces),
                     )
                 )
@@ -309,6 +324,7 @@ class RecomputeEngine:
                         type=spec.type,
                         status=FeatureStatus.BYPASSED,
                         error=FeatureBuildError(feature=spec.id, reason=skipped.reason),
+                        warnings=notes,
                         face_count=len(current.topology.faces) if current else 0,
                     )
                 )
@@ -320,6 +336,7 @@ class RecomputeEngine:
                         type=spec.type,
                         status=FeatureStatus.FAILED,
                         error=_contextualise(error, spec.id),
+                        warnings=notes,
                     )
                 )
                 halted = True
@@ -332,6 +349,7 @@ class RecomputeEngine:
                     id=spec.id,
                     type=spec.type,
                     status=FeatureStatus.BUILT,
+                    warnings=notes,
                     face_count=len(current.topology.faces),
                 )
             )

@@ -158,7 +158,6 @@ def handler_for(spec: FeatureSpec) -> FeatureHandler:
                 f"{', '.join(sorted(_REGISTRY)) or 'none'}"
             ),
         )
-    validate_options(spec)
     return handler
 
 
@@ -189,32 +188,50 @@ def describe_types() -> tuple[dict[str, object], ...]:
     )
 
 
-def validate_options(spec: FeatureSpec) -> None:
-    """Refuse a key the feature type does not read.
+def unknown_options(spec: FeatureSpec) -> str | None:
+    """Describe any key the feature type does not read, or None if all are known.
 
-    Without this a misspelled or misplaced option is accepted, written to the
-    document and ignored — the part builds, looks wrong, and nothing anywhere
-    says why. Everything else in this system fails loudly; this is the one place
-    that quietly did not.
+    A misspelled or misplaced option used to be accepted, written to the document
+    and ignored — the part built, looked wrong, and nothing said why. This is what
+    makes it visible.
+
+    It reports rather than raises, because the two callers want different things
+    from the same answer. See :func:`validate_options`.
     """
     handler = _REGISTRY.get(spec.type)
     if handler is None:
-        return  # handler_for reports the unknown type, with the list of known ones.
+        return None  # handler_for reports the unknown type, with the known ones.
     known = {option.name for option in handler.options}
     unknown = sorted(set(spec.options) - known)
     if not unknown:
-        return
+        return None
     detail = []
     for key in unknown:
         near = get_close_matches(key, sorted(known), n=1, cutoff=0.7)
         detail.append(f"'{key}'" + (f" (did you mean '{near[0]}'?)" if near else ""))
-    raise FeatureBuildError(
-        feature=spec.id,
-        reason=(
-            f"{spec.type} does not take {', '.join(detail)}. "
-            f"It takes: {', '.join(sorted(known)) or 'no options'}."
-        ),
+    # Phrased without a consequence: one caller ignores the key and the other
+    # refuses it, and each says so itself.
+    return (
+        f"{spec.type} does not take {', '.join(detail)}. "
+        f"It takes: {', '.join(sorted(known)) or 'no options'}"
     )
+
+
+def validate_options(spec: FeatureSpec) -> None:
+    """Refuse a key the feature type does not read.
+
+    Used when a feature is being *written* — where the mistake is being made, the
+    caller can still fix it, and nothing is lost by saying no.
+
+    Deliberately not used on the rebuild path. Applying it there made every
+    existing document containing an ignored key stop building, which took three
+    working parts down on a live server: the keys had always been ignored, so the
+    documents had been saved that way and the parts were correct. A rebuild
+    reports it as a warning instead — loud, but not retroactively destructive.
+    """
+    reason = unknown_options(spec)
+    if reason is not None:
+        raise FeatureBuildError(feature=spec.id, reason=f"{reason}. Remove it or correct it")
 
 
 # --------------------------------------------------------------------------

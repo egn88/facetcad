@@ -75,6 +75,8 @@ export interface FeatureOutcome {
   status: FeatureStatus;
   faceCount: number;
   error: DomainError | null;
+  /** Said about a feature that still built — an ignored option, say. */
+  warnings?: string[];
 }
 
 export interface BuildResult {

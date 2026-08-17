@@ -210,10 +210,40 @@ export class ProjectStore {
         reasons,
       });
     }
+    // Warnings come after failures: a feature that built but is carrying an
+    // ignored option matters less than one that did not build at all, and
+    // burying the failure under advice would be the wrong way round.
+    for (const outcome of build.features) {
+      for (const warning of outcome.warnings ?? []) {
+        views.push({ headline: `${outcome.id} — ignored`, message: warning, reasons: [] });
+      }
+    }
     return views;
   });
 
   readonly buildsCleanly = computed(() => this.diagnostics().length === 0);
+
+  /**
+   * Rebuild everything, discarding every cached feature first.
+   *
+   * The cache is keyed on content and should never be stale, so this is a way
+   * out of a state that should not happen rather than part of normal use —
+   * which is why it is a button and not something done on every edit.
+   */
+  async forceRebuild(): Promise<void> {
+    const id = this.projectId();
+    if (!id) return;
+    this.busy.set(true);
+    try {
+      await this.api.recompute(id, true);
+      await this.reload();
+      this.notify('Rebuilt from scratch', false);
+    } catch {
+      this.notify('Rebuild failed', true);
+    } finally {
+      this.busy.set(false);
+    }
+  }
   readonly statusLabel = computed(() => (this.build()?.ok ? 'builds' : 'broken'));
   readonly statusClass = computed(() => (this.build()?.ok ? 'ok' : 'error'));
 

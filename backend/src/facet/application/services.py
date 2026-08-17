@@ -31,6 +31,7 @@ from facet.domain.topology import TopologyIndex
 
 from .datum_proposal import DatumProposal, propose_datum_for_face
 from .enclosure import enclosure_for_bounds, enclosure_panels
+from .features import validate_options
 from .flatten import FlattenResult, is_blend, lay_out
 from .jointed import OUTER, JointedResult, JointSpec, joint_faces
 from .naming import NamedSolid
@@ -227,11 +228,18 @@ class ProjectService:
         at: int | None = None,
         body: str | None = None,
     ) -> RecomputeResult:
+        # Refused here rather than on the rebuild path. This is where the mistake
+        # is being made and where the caller can still fix it. Refusing at rebuild
+        # instead broke documents already saved with an ignored key — three
+        # working parts on a live server stopped building, because the keys had
+        # always been ignored and the parts had been correct anyway.
+        validate_options(spec)
         document = self._repository.load(project_id)
         document.add_feature(spec, at, body)
         return self._persist_and_rebuild(project_id, document)
 
     def update_feature(self, project_id: str, spec: FeatureSpec) -> RecomputeResult:
+        validate_options(spec)
         document = self._repository.load(project_id)
         document.replace_feature(spec)
         return self._persist_and_rebuild(project_id, document)

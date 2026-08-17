@@ -191,8 +191,11 @@ export class CadApiService {
 
   // -- rebuild and inspect ------------------------------------------------
 
-  recompute(id: string): Promise<BuildResult> {
-    return firstValueFrom(this.http.post<BuildResult>(`${BASE}/projects/${id}/recompute`, {}));
+  recompute(id: string, force = false): Promise<BuildResult> {
+    const query = force ? '?force=true' : '';
+    return firstValueFrom(
+      this.http.post<BuildResult>(`${BASE}/projects/${id}/recompute${query}`, {}),
+    );
   }
 
   /** Every body, tessellated in its own coordinates with its placement. */

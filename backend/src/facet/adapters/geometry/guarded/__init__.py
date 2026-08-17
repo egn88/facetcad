@@ -5,6 +5,18 @@ in-process can interrupt one. This adapter puts the kernel somewhere that can be
 killed, which is the only thing that works.
 """
 
-from .kernel import DEFAULT_TIMEOUT, GuardedKernel, KernelRestarted, KernelTimeout
+from .kernel import (
+    DEFAULT_TIMEOUT,
+    GuardedKernel,
+    KernelBusy,
+    KernelRestarted,
+    KernelTimeout,
+)
 
-__all__ = ["DEFAULT_TIMEOUT", "GuardedKernel", "KernelRestarted", "KernelTimeout"]
+__all__ = [
+    "DEFAULT_TIMEOUT",
+    "GuardedKernel",
+    "KernelBusy",
+    "KernelRestarted",
+    "KernelTimeout",
+]

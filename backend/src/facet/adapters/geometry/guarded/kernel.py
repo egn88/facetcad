@@ -27,6 +27,7 @@ from __future__ import annotations
 import contextlib
 import multiprocessing as mp
 import os
+import threading
 from collections.abc import Callable
 from multiprocessing.connection import Connection
 from typing import Any
@@ -56,6 +57,15 @@ DEFAULT_TIMEOUT = float(os.environ.get("FACET_GEOMETRY_TIMEOUT", "60"))
 #: import alone is seconds, and it is not the operation being timed.
 STARTUP_TIMEOUT = 60.0
 
+#: How long a request will wait for the worker to be free before giving up.
+#:
+#: There is one worker and one pipe, so geometry is strictly one at a time. Under
+#: load that queue is where requests wait, and an unbounded one is how a server
+#: falls over politely-looking: every client waits, nothing is refused, and the
+#: queue grows until memory does. Refusing quickly is kinder than a reply nobody
+#: is still waiting for.
+DEFAULT_QUEUE_WAIT = float(os.environ.get("FACET_GEOMETRY_QUEUE_WAIT", "30"))
+
 
 class KernelTimeout(RuntimeError):
     """A geometry operation exceeded its deadline and was killed.
@@ -73,6 +83,22 @@ class KernelTimeout(RuntimeError):
             "this input. Nothing was changed."
         )
         self.method = method
+        self.seconds = seconds
+
+
+class KernelBusy(RuntimeError):
+    """The geometry worker was occupied for too long to wait any longer.
+
+    Not a failure of the request — it never ran. The distinction matters to a
+    caller deciding whether to retry: this one is worth retrying, and a timeout
+    or a geometry error is not.
+    """
+
+    def __init__(self, seconds: float) -> None:
+        super().__init__(
+            f"the geometry worker was busy for more than {seconds:g}s. "
+            "Only one rebuild runs at a time; try again shortly."
+        )
         self.seconds = seconds
 
 
@@ -97,10 +123,18 @@ class GuardedKernel:
         kernel_name: str = "occt",
         *,
         timeout: float = DEFAULT_TIMEOUT,
+        queue_wait: float = DEFAULT_QUEUE_WAIT,
         on_restart: Callable[[], None] | None = None,
     ) -> None:
         self._kernel_name = kernel_name
         self._timeout = timeout
+        self._queue_wait = queue_wait
+        # One worker, one pipe, and FastAPI runs sync endpoints in a threadpool:
+        # without this two requests interleave their sends and each reads the
+        # other's reply. Observed directly — four concurrent callers, four
+        # protocol failures. The lock is not a throughput choice; the work was
+        # already serial, because there is one worker.
+        self._lock = threading.Lock()
         # Called when the worker is replaced, so caches holding now-dead handles
         # can be cleared. Without it a stale handle is retried forever.
         self._on_restart = on_restart
@@ -188,6 +222,14 @@ class GuardedKernel:
     # -- plumbing ----------------------------------------------------------
 
     def _call(self, method: str, *args: Any, **kwargs: Any) -> Any:
+        if not self._lock.acquire(timeout=self._queue_wait):
+            raise KernelBusy(self._queue_wait)
+        try:
+            return self._locked_call(method, *args, **kwargs)
+        finally:
+            self._lock.release()
+
+    def _locked_call(self, method: str, *args: Any, **kwargs: Any) -> Any:
         self._ensure()
         conn = self._conn
         assert conn is not None
