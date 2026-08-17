@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
@@ -93,6 +95,9 @@ class FeatureOutcome:
             "faceCount": self.face_count,
             "error": self.error.as_dict() if self.error else None,
             "warnings": list(self.warnings),
+            # Rounded: this is for spotting the one slow feature in a long
+            # history, and microseconds are noise at that job.
+            "durationMs": round(self.duration_ms, 1),
         }
 
 
@@ -222,20 +227,36 @@ class RecomputeEngine:
     def __init__(self, kernel: GeometryKernel) -> None:
         self._kernel = kernel
         self._cache: dict[str, _CacheEntry] = {}
+        # One rebuild of a project at a time.
+        #
+        # The frontend asks for /bodies and /topologies together, and both need
+        # the same rebuild. Without this they both miss a cold cache and both do
+        # the whole thing, interleaved through the kernel — on a 35-feature
+        # document that turned an 11s rebuild into 26s and a 502. Serialised, the
+        # second waits and then finds the answer already cached.
+        #
+        # It also protects the cache dict itself, which two rebuilds were
+        # mutating at once.
+        self._lock = threading.RLock()
 
     @property
     def kernel(self) -> GeometryKernel:
         return self._kernel
 
     def invalidate(self, feature: str | None = None) -> None:
-        if feature is None:
-            self._cache.clear()
-        else:
-            self._cache.pop(feature, None)
+        with self._lock:
+            if feature is None:
+                self._cache.clear()
+            else:
+                self._cache.pop(feature, None)
 
     # -- the rebuild -------------------------------------------------------
 
     def recompute(self, document: Document, detail: str = Detail.DRAFT) -> RecomputeResult:
+        with self._lock:
+            return self._recompute(document, detail)
+
+    def _recompute(self, document: Document, detail: str = Detail.DRAFT) -> RecomputeResult:
         try:
             document.validate()
             parameters = document.parameters.resolve()
@@ -313,6 +334,7 @@ class RecomputeEngine:
                 )
                 continue
 
+            started = time.perf_counter()
             try:
                 current = self._build_one(
                     spec, document, parameters, frames, naming, current, detail
@@ -325,6 +347,7 @@ class RecomputeEngine:
                         status=FeatureStatus.BYPASSED,
                         error=FeatureBuildError(feature=spec.id, reason=skipped.reason),
                         warnings=notes,
+                        duration_ms=(time.perf_counter() - started) * 1000,
                         face_count=len(current.topology.faces) if current else 0,
                     )
                 )
@@ -337,6 +360,7 @@ class RecomputeEngine:
                         status=FeatureStatus.FAILED,
                         error=_contextualise(error, spec.id),
                         warnings=notes,
+                        duration_ms=(time.perf_counter() - started) * 1000,
                     )
                 )
                 halted = True
@@ -350,6 +374,7 @@ class RecomputeEngine:
                     type=spec.type,
                     status=FeatureStatus.BUILT,
                     warnings=notes,
+                    duration_ms=(time.perf_counter() - started) * 1000,
                     face_count=len(current.topology.faces),
                 )
             )
