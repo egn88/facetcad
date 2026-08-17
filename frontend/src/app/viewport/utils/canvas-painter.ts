@@ -97,8 +97,10 @@ export class CanvasPainter {
     // both. Sorting them separately is what makes a CPU-drawn solid look like
     // an X-ray.
     const drawables: Drawable[] = [];
-    scene.traverse((object) => {
-      if (!object.visible) return;
+    // traverseVisible, not traverse: `traverse` walks into an invisible
+    // object's children anyway, so hiding a group — which is how the sketch
+    // toggle works — would hide nothing here while working under WebGL.
+    scene.traverseVisible((object) => {
       if (object instanceof THREE.Mesh) {
         this.collectMesh(object, camera, width, height, drawables);
       } else if (object instanceof THREE.LineSegments) {
