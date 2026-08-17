@@ -245,3 +245,33 @@ def test_waiting_too_long_for_a_busy_worker_is_refused_not_queued() -> None:
         assert "one rebuild runs at a time" in str(busy[0])
     finally:
         guarded.close()
+
+
+def test_a_worker_that_dies_on_its_own_also_invalidates_its_handles() -> None:
+    """Not every death is a deadline we noticed.
+
+    A segfault or an OOM kill leaves the process gone with no timeout involved,
+    and the next call simply starts a replacement. That path skipped the
+    generation bump, so a handle from the dead worker passed the staleness check
+    and reached a worker that had never issued it — observed in production as
+    'unknown solid handle'. The dangerous version is quieter: the replacement
+    numbers solids from s1 again, so the same id can name a *different* solid.
+    """
+    cleared: list[int] = []
+    guarded = GuardedKernel("occt", timeout=30.0, on_restart=lambda: cleared.append(1))
+    try:
+        result = guarded.pad(PadRequest(feature="p", profile=square(20.0), length=10.0))
+
+        # Kill it the way the OS would, with no deadline and no notice.
+        guarded._process.kill()  # type: ignore[union-attr]
+        guarded._process.join(timeout=5)  # type: ignore[union-attr]
+
+        with pytest.raises(KernelRestarted):
+            guarded.volume(result.solid)
+        assert cleared == [1], "the caches were not told the worker had been replaced"
+
+        # And the replacement is usable.
+        rebuilt = guarded.pad(PadRequest(feature="p", profile=square(30.0), length=10.0))
+        assert guarded.volume(rebuilt.solid) == pytest.approx(9000.0)
+    finally:
+        guarded.close()

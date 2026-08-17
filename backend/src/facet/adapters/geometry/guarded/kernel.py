@@ -176,48 +176,46 @@ class GuardedKernel:
         return self._tag(self._call("pad", request))
 
     def pocket(self, base: SolidHandle, request: PocketRequest) -> SolidResult:
-        return self._tag(self._call("pocket", self._untag(base), request))
+        return self._tag(self._call("pocket", base, request))
 
     def fuse(self, base: SolidHandle, addition: SolidHandle) -> SolidResult:
-        return self._tag(self._call("fuse", self._untag(base), self._untag(addition)))
+        return self._tag(self._call("fuse", base, addition))
 
     def fillet(self, base: SolidHandle, request: BlendRequest) -> SolidResult:
-        return self._tag(self._call("fillet", self._untag(base), request))
+        return self._tag(self._call("fillet", base, request))
 
     def chamfer(self, base: SolidHandle, request: BlendRequest) -> SolidResult:
-        return self._tag(self._call("chamfer", self._untag(base), request))
+        return self._tag(self._call("chamfer", base, request))
 
     def thread(self, base: SolidHandle, request: ThreadRequest) -> SolidResult:
-        return self._tag(self._call("thread", self._untag(base), request))
+        return self._tag(self._call("thread", base, request))
 
     def tessellate(self, solid: SolidHandle, tolerance: float = 0.1) -> Tessellation:
-        return self._call("tessellate", self._untag(solid), tolerance)
+        return self._call("tessellate", solid, tolerance)
 
     def bounding_box(self, solid: SolidHandle) -> BoundingBox:
-        return self._call("bounding_box", self._untag(solid))
+        return self._call("bounding_box", solid)
 
     def volume(self, solid: SolidHandle) -> float:
-        return self._call("volume", self._untag(solid))
+        return self._call("volume", solid)
 
     def export_brep(self, solid: SolidHandle, fmt: str) -> bytes:
-        return self._call("export_brep", self._untag(solid), fmt)
+        return self._call("export_brep", solid, fmt)
 
     def export_drawing(self, *args: Any, **kwargs: Any) -> Any:
-        return self._call("export_drawing", *self._untag_all(args), **kwargs)
+        return self._call("export_drawing", *args, **kwargs)
 
     def face_profile(self, *args: Any, **kwargs: Any) -> Any:
-        return self._call("face_profile", *self._untag_all(args), **kwargs)
+        return self._call("face_profile", *args, **kwargs)
 
     def section_profile(self, *args: Any, **kwargs: Any) -> Any:
-        return self._call("section_profile", *self._untag_all(args), **kwargs)
+        return self._call("section_profile", *args, **kwargs)
 
     def release(self, solid: SolidHandle) -> None:
-        # A handle from a dead worker refers to memory that is already gone, so
-        # releasing it is done, not failed.
-        if self._stale(solid) or self._process is None:
-            return
+        # A handle from a dead or replaced worker refers to memory that is
+        # already gone, so releasing it is done, not failed.
         with contextlib.suppress(KernelTimeout, KernelRestarted):
-            self._call("release", self._untag(solid))
+            self._call("release", solid)
 
     # -- plumbing ----------------------------------------------------------
 
@@ -231,6 +229,9 @@ class GuardedKernel:
 
     def _locked_call(self, method: str, *args: Any, **kwargs: Any) -> Any:
         self._ensure()
+        # Only now is the generation known to belong to a *live* worker, so this
+        # is the only safe place to judge a handle against it.
+        args = self._untag_all(args)
         conn = self._conn
         assert conn is not None
         try:
@@ -263,6 +264,16 @@ class GuardedKernel:
     def _ensure(self) -> None:
         if self._process is not None and self._process.is_alive():
             return
+        if self._process is not None:
+            # A worker that died on its own — a segfault, an OOM kill — rather
+            # than on a deadline we noticed. It still has to go through the
+            # replacement path: that is what bumps the generation and clears the
+            # caches, and skipping it let a handle from the dead worker pass the
+            # staleness check and reach a fresh worker that had never issued it.
+            # Seen in production as "unknown solid handle" on one rebuild, which
+            # was luck — the same id in the new worker names a different solid,
+            # so the alternative was exporting the wrong shape in silence.
+            self._restart()
         self._start()
 
     def _start(self) -> None:
