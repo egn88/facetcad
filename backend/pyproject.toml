@@ -45,7 +45,13 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-q --strict-markers"
-markers = ["occt: requires the OpenCascade kernel to be installed"]
+markers = [
+    "occt: requires the OpenCascade kernel to be installed",
+    # A modelled thread is seconds a rebuild, and the sweeps that cover it run
+    # dozens. Worth having and worth being able to leave out while iterating:
+    # `-m "not slow"`. CI runs everything.
+    "slow: seconds rather than milliseconds, because it cuts a real helix",
+]
 
 [tool.ruff]
 line-length = 100

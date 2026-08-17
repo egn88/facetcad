@@ -1,0 +1,444 @@
+{
+ "blended/draft": {
+  "main": {
+   "tags": [
+    "base/cap+",
+    "base/cap-",
+    "base/side[outline.bottom]",
+    "base/side[outline.left]",
+    "base/side[outline.right]",
+    "base/side[outline.top]",
+    "corners/fillet[base/side[outline.bottom] ^ base/side[outline.left]]",
+    "corners/fillet[base/side[outline.bottom] ^ base/side[outline.right]]",
+    "corners/fillet[base/side[outline.left] ^ base/side[outline.top]]",
+    "corners/fillet[base/side[outline.right] ^ base/side[outline.top]]",
+    "lip/chamfer[base/cap+ ^ base/side[outline.bottom]]",
+    "lip/chamfer[base/cap+ ^ base/side[outline.left]]",
+    "lip/chamfer[base/cap+ ^ base/side[outline.right]]",
+    "lip/chamfer[base/cap+ ^ base/side[outline.top]]",
+    "lip/chamfer[base/cap+ ^ corners/fillet[base/side[outline.bottom] ^ base/side[outline.left]]]",
+    "lip/chamfer[base/cap+ ^ corners/fillet[base/side[outline.bottom] ^ base/side[outline.right]]]",
+    "lip/chamfer[base/cap+ ^ corners/fillet[base/side[outline.left] ^ base/side[outline.top]]]",
+    "lip/chamfer[base/cap+ ^ corners/fillet[base/side[outline.right] ^ base/side[outline.top]]]"
+   ],
+   "volume": 52251.919170459354
+  }
+ },
+ "blended/full": {
+  "main": {
+   "tags": [
+    "base/cap+",
+    "base/cap-",
+    "base/side[outline.bottom]",
+    "base/side[outline.left]",
+    "base/side[outline.right]",
+    "base/side[outline.top]",
+    "corners/fillet[base/side[outline.bottom] ^ base/side[outline.left]]",
+    "corners/fillet[base/side[outline.bottom] ^ base/side[outline.right]]",
+    "corners/fillet[base/side[outline.left] ^ base/side[outline.top]]",
+    "corners/fillet[base/side[outline.right] ^ base/side[outline.top]]",
+    "lip/chamfer[base/cap+ ^ base/side[outline.bottom]]",
+    "lip/chamfer[base/cap+ ^ base/side[outline.left]]",
+    "lip/chamfer[base/cap+ ^ base/side[outline.right]]",
+    "lip/chamfer[base/cap+ ^ base/side[outline.top]]",
+    "lip/chamfer[base/cap+ ^ corners/fillet[base/side[outline.bottom] ^ base/side[outline.left]]]",
+    "lip/chamfer[base/cap+ ^ corners/fillet[base/side[outline.bottom] ^ base/side[outline.right]]]",
+    "lip/chamfer[base/cap+ ^ corners/fillet[base/side[outline.left] ^ base/side[outline.top]]]",
+    "lip/chamfer[base/cap+ ^ corners/fillet[base/side[outline.right] ^ base/side[outline.top]]]"
+   ],
+   "volume": 52251.919170459354
+  }
+ },
+ "curved/draft": {
+  "main": {
+   "tags": [
+    "body/cap+",
+    "body/cap-",
+    "body/side[capsule.bottom]",
+    "body/side[capsule.cap_l]",
+    "body/side[capsule.cap_r]",
+    "body/side[capsule.top]",
+    "bore/wall[hole.ring]"
+   ],
+   "volume": 7840.3545393045115
+  }
+ },
+ "curved/full": {
+  "main": {
+   "tags": [
+    "body/cap+",
+    "body/cap-",
+    "body/side[capsule.bottom]",
+    "body/side[capsule.cap_l]",
+    "body/side[capsule.cap_r]",
+    "body/side[capsule.top]",
+    "bore/wall[hole.ring]"
+   ],
+   "volume": 7840.3545393045115
+  }
+ },
+ "drilled and tapped/draft": {
+  "main": {
+   "tags": [
+    "base/cap+",
+    "base/cap-",
+    "base/side[outline.bottom]",
+    "base/side[outline.left]",
+    "base/side[outline.right]",
+    "base/side[outline.top]",
+    "bolt/cbore[holes.a]",
+    "bolt/cbore_floor",
+    "bolt/wall[holes.a]",
+    "tap/floor",
+    "tap/wall[holes.b]"
+   ],
+   "volume": 48153.05803651871
+  }
+ },
+ "drilled and tapped/full": {
+  "main": {
+   "tags": [
+    "base/cap+",
+    "base/cap-",
+    "base/side[outline.bottom]",
+    "base/side[outline.left]",
+    "base/side[outline.right]",
+    "base/side[outline.top]",
+    "bolt/cbore[holes.a]",
+    "bolt/cbore_floor",
+    "bolt/wall[holes.a]",
+    "tap/floor",
+    "tap/wall[holes.b]"
+   ],
+   "volume": 48153.05803651871
+  }
+ },
+ "plate with a pocket/draft": {
+  "main": {
+   "tags": [
+    "base/cap+",
+    "base/cap-",
+    "base/side[outline.bottom]",
+    "base/side[outline.left]",
+    "base/side[outline.right]",
+    "base/side[outline.top]",
+    "slot/floor",
+    "slot/wall[slot.bottom]",
+    "slot/wall[slot.left]",
+    "slot/wall[slot.right]",
+    "slot/wall[slot.top]"
+   ],
+   "volume": 52320.0
+  }
+ },
+ "plate with a pocket/full": {
+  "main": {
+   "tags": [
+    "base/cap+",
+    "base/cap-",
+    "base/side[outline.bottom]",
+    "base/side[outline.left]",
+    "base/side[outline.right]",
+    "base/side[outline.top]",
+    "slot/floor",
+    "slot/wall[slot.bottom]",
+    "slot/wall[slot.left]",
+    "slot/wall[slot.right]",
+    "slot/wall[slot.top]"
+   ],
+   "volume": 52320.0
+  }
+ },
+ "tapped cavity/draft": {
+  "main": {
+   "tags": [
+    "block/cap+",
+    "block/cap-",
+    "block/side[outline.bottom]",
+    "block/side[outline.left]",
+    "block/side[outline.right]",
+    "block/side[outline.top]",
+    "cav/floor",
+    "cav/wall[cavity.bottom]",
+    "cav/wall[cavity.left]",
+    "cav/wall[cavity.right]",
+    "cav/wall[cavity.top]",
+    "m8/floor",
+    "m8/thread[bores.tap]#0",
+    "m8/thread[bores.tap]#1",
+    "m8/thread[bores.tap]#10",
+    "m8/thread[bores.tap]#11",
+    "m8/thread[bores.tap]#12",
+    "m8/thread[bores.tap]#13",
+    "m8/thread[bores.tap]#14",
+    "m8/thread[bores.tap]#15",
+    "m8/thread[bores.tap]#16",
+    "m8/thread[bores.tap]#17",
+    "m8/thread[bores.tap]#18",
+    "m8/thread[bores.tap]#19",
+    "m8/thread[bores.tap]#2",
+    "m8/thread[bores.tap]#20",
+    "m8/thread[bores.tap]#21",
+    "m8/thread[bores.tap]#22",
+    "m8/thread[bores.tap]#23",
+    "m8/thread[bores.tap]#24",
+    "m8/thread[bores.tap]#25",
+    "m8/thread[bores.tap]#26",
+    "m8/thread[bores.tap]#27",
+    "m8/thread[bores.tap]#28",
+    "m8/thread[bores.tap]#29",
+    "m8/thread[bores.tap]#3",
+    "m8/thread[bores.tap]#30",
+    "m8/thread[bores.tap]#31",
+    "m8/thread[bores.tap]#32",
+    "m8/thread[bores.tap]#33",
+    "m8/thread[bores.tap]#34",
+    "m8/thread[bores.tap]#35",
+    "m8/thread[bores.tap]#36",
+    "m8/thread[bores.tap]#37",
+    "m8/thread[bores.tap]#38",
+    "m8/thread[bores.tap]#39",
+    "m8/thread[bores.tap]#4",
+    "m8/thread[bores.tap]#40",
+    "m8/thread[bores.tap]#41",
+    "m8/thread[bores.tap]#42",
+    "m8/thread[bores.tap]#43",
+    "m8/thread[bores.tap]#44",
+    "m8/thread[bores.tap]#45",
+    "m8/thread[bores.tap]#46",
+    "m8/thread[bores.tap]#47",
+    "m8/thread[bores.tap]#48",
+    "m8/thread[bores.tap]#49",
+    "m8/thread[bores.tap]#5",
+    "m8/thread[bores.tap]#50",
+    "m8/thread[bores.tap]#51",
+    "m8/thread[bores.tap]#52",
+    "m8/thread[bores.tap]#53",
+    "m8/thread[bores.tap]#54",
+    "m8/thread[bores.tap]#55",
+    "m8/thread[bores.tap]#56",
+    "m8/thread[bores.tap]#57",
+    "m8/thread[bores.tap]#58",
+    "m8/thread[bores.tap]#59",
+    "m8/thread[bores.tap]#6",
+    "m8/thread[bores.tap]#60",
+    "m8/thread[bores.tap]#61",
+    "m8/thread[bores.tap]#62",
+    "m8/thread[bores.tap]#63",
+    "m8/thread[bores.tap]#64",
+    "m8/thread[bores.tap]#65",
+    "m8/thread[bores.tap]#66",
+    "m8/thread[bores.tap]#67",
+    "m8/thread[bores.tap]#68",
+    "m8/thread[bores.tap]#69",
+    "m8/thread[bores.tap]#7",
+    "m8/thread[bores.tap]#8",
+    "m8/thread[bores.tap]#9",
+    "m8/wall[bores.tap]",
+    "uprights/fillet[cav/wall[cavity.bottom] ^ cav/wall[cavity.left]]",
+    "uprights/fillet[cav/wall[cavity.bottom] ^ cav/wall[cavity.right]]",
+    "uprights/fillet[cav/wall[cavity.left] ^ cav/wall[cavity.top]]",
+    "uprights/fillet[cav/wall[cavity.right] ^ cav/wall[cavity.top]]",
+    "vent/wall[bores.vent]"
+   ],
+   "volume": 41006.67596006281
+  }
+ },
+ "tapped cavity/full": {
+  "main": {
+   "tags": [
+    "block/cap+",
+    "block/cap-",
+    "block/side[outline.bottom]",
+    "block/side[outline.left]",
+    "block/side[outline.right]",
+    "block/side[outline.top]",
+    "cav/floor",
+    "cav/wall[cavity.bottom]",
+    "cav/wall[cavity.left]",
+    "cav/wall[cavity.right]",
+    "cav/wall[cavity.top]",
+    "m8/floor",
+    "m8/thread[bores.tap]#0",
+    "m8/thread[bores.tap]#1",
+    "m8/thread[bores.tap]#10",
+    "m8/thread[bores.tap]#11",
+    "m8/thread[bores.tap]#12",
+    "m8/thread[bores.tap]#13",
+    "m8/thread[bores.tap]#14",
+    "m8/thread[bores.tap]#15",
+    "m8/thread[bores.tap]#16",
+    "m8/thread[bores.tap]#17",
+    "m8/thread[bores.tap]#18",
+    "m8/thread[bores.tap]#19",
+    "m8/thread[bores.tap]#2",
+    "m8/thread[bores.tap]#20",
+    "m8/thread[bores.tap]#21",
+    "m8/thread[bores.tap]#22",
+    "m8/thread[bores.tap]#23",
+    "m8/thread[bores.tap]#24",
+    "m8/thread[bores.tap]#25",
+    "m8/thread[bores.tap]#26",
+    "m8/thread[bores.tap]#27",
+    "m8/thread[bores.tap]#28",
+    "m8/thread[bores.tap]#29",
+    "m8/thread[bores.tap]#3",
+    "m8/thread[bores.tap]#30",
+    "m8/thread[bores.tap]#31",
+    "m8/thread[bores.tap]#32",
+    "m8/thread[bores.tap]#33",
+    "m8/thread[bores.tap]#34",
+    "m8/thread[bores.tap]#35",
+    "m8/thread[bores.tap]#36",
+    "m8/thread[bores.tap]#37",
+    "m8/thread[bores.tap]#38",
+    "m8/thread[bores.tap]#39",
+    "m8/thread[bores.tap]#4",
+    "m8/thread[bores.tap]#40",
+    "m8/thread[bores.tap]#41",
+    "m8/thread[bores.tap]#42",
+    "m8/thread[bores.tap]#43",
+    "m8/thread[bores.tap]#44",
+    "m8/thread[bores.tap]#45",
+    "m8/thread[bores.tap]#46",
+    "m8/thread[bores.tap]#47",
+    "m8/thread[bores.tap]#48",
+    "m8/thread[bores.tap]#49",
+    "m8/thread[bores.tap]#5",
+    "m8/thread[bores.tap]#50",
+    "m8/thread[bores.tap]#51",
+    "m8/thread[bores.tap]#52",
+    "m8/thread[bores.tap]#53",
+    "m8/thread[bores.tap]#54",
+    "m8/thread[bores.tap]#55",
+    "m8/thread[bores.tap]#56",
+    "m8/thread[bores.tap]#57",
+    "m8/thread[bores.tap]#58",
+    "m8/thread[bores.tap]#59",
+    "m8/thread[bores.tap]#6",
+    "m8/thread[bores.tap]#60",
+    "m8/thread[bores.tap]#61",
+    "m8/thread[bores.tap]#62",
+    "m8/thread[bores.tap]#63",
+    "m8/thread[bores.tap]#64",
+    "m8/thread[bores.tap]#65",
+    "m8/thread[bores.tap]#66",
+    "m8/thread[bores.tap]#67",
+    "m8/thread[bores.tap]#68",
+    "m8/thread[bores.tap]#69",
+    "m8/thread[bores.tap]#7",
+    "m8/thread[bores.tap]#8",
+    "m8/thread[bores.tap]#9",
+    "m8/wall[bores.tap]",
+    "uprights/fillet[cav/wall[cavity.bottom] ^ cav/wall[cavity.left]]",
+    "uprights/fillet[cav/wall[cavity.bottom] ^ cav/wall[cavity.right]]",
+    "uprights/fillet[cav/wall[cavity.left] ^ cav/wall[cavity.top]]",
+    "uprights/fillet[cav/wall[cavity.right] ^ cav/wall[cavity.top]]",
+    "vent/wall[bores.vent]"
+   ],
+   "volume": 41006.67596006281
+  }
+ },
+ "two bodies/draft": {
+  "pin": {
+   "tags": [
+    "lead/chamfer[shaft/cap+ ^ shaft/side[pin.rim]]",
+    "shaft/cap+",
+    "shaft/cap-",
+    "shaft/side[pin.rim]"
+   ],
+   "volume": 4597.197249753064
+  },
+  "plate": {
+   "tags": [
+    "round/fillet[slab/side[plate.bottom] ^ slab/side[plate.left]]",
+    "round/fillet[slab/side[plate.bottom] ^ slab/side[plate.right]]",
+    "round/fillet[slab/side[plate.left] ^ slab/side[plate.top]]",
+    "round/fillet[slab/side[plate.right] ^ slab/side[plate.top]]",
+    "slab/cap+",
+    "slab/cap-",
+    "slab/side[plate.bottom]",
+    "slab/side[plate.left]",
+    "slab/side[plate.right]",
+    "slab/side[plate.top]"
+   ],
+   "volume": 21490.123859659492
+  }
+ },
+ "two bodies/full": {
+  "pin": {
+   "tags": [
+    "lead/chamfer[shaft/cap+ ^ shaft/side[pin.rim]]",
+    "shaft/cap+",
+    "shaft/cap-",
+    "shaft/side[pin.rim]"
+   ],
+   "volume": 4597.197249753064
+  },
+  "plate": {
+   "tags": [
+    "round/fillet[slab/side[plate.bottom] ^ slab/side[plate.left]]",
+    "round/fillet[slab/side[plate.bottom] ^ slab/side[plate.right]]",
+    "round/fillet[slab/side[plate.left] ^ slab/side[plate.top]]",
+    "round/fillet[slab/side[plate.right] ^ slab/side[plate.top]]",
+    "slab/cap+",
+    "slab/cap-",
+    "slab/side[plate.bottom]",
+    "slab/side[plate.left]",
+    "slab/side[plate.right]",
+    "slab/side[plate.top]"
+   ],
+   "volume": 21490.123859659492
+  }
+ },
+ "wedge and notch/draft": {
+  "main": {
+   "tags": [
+    "bevel/chamfer[wedge/cap+ ^ wedge/side[wedge.c1]]",
+    "bevel/chamfer[wedge/cap+ ^ wedge/side[wedge.c2]]",
+    "notch/cap+",
+    "notch/cap-",
+    "notch/side[notched.e0]",
+    "notch/side[notched.e1]",
+    "notch/side[notched.e2]",
+    "notch/side[notched.e3]",
+    "notch/side[notched.e4]",
+    "notch/side[notched.e5]",
+    "notch/side[notched.e6]",
+    "notch/side[notched.e7]",
+    "soft/fillet[wedge/cap+ ^ wedge/side[wedge.c0]]",
+    "wedge/cap+",
+    "wedge/cap-",
+    "wedge/side[wedge.c0]",
+    "wedge/side[wedge.c1]",
+    "wedge/side[wedge.c2]"
+   ],
+   "volume": 3832.9240501896325
+  }
+ },
+ "wedge and notch/full": {
+  "main": {
+   "tags": [
+    "bevel/chamfer[wedge/cap+ ^ wedge/side[wedge.c1]]",
+    "bevel/chamfer[wedge/cap+ ^ wedge/side[wedge.c2]]",
+    "notch/cap+",
+    "notch/cap-",
+    "notch/side[notched.e0]",
+    "notch/side[notched.e1]",
+    "notch/side[notched.e2]",
+    "notch/side[notched.e3]",
+    "notch/side[notched.e4]",
+    "notch/side[notched.e5]",
+    "notch/side[notched.e6]",
+    "notch/side[notched.e7]",
+    "soft/fillet[wedge/cap+ ^ wedge/side[wedge.c0]]",
+    "wedge/cap+",
+    "wedge/cap-",
+    "wedge/side[wedge.c0]",
+    "wedge/side[wedge.c1]",
+    "wedge/side[wedge.c2]"
+   ],
+   "volume": 3832.9240501896325
+  }
+ }
+}

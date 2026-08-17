@@ -299,6 +299,88 @@ WEDGE_AND_NOTCH: dict[str, Any] = {
 }
 
 
+#: A *modelled* thread, alongside faces that have nothing to do with it.
+#:
+#: The rest of the battery taps holes but never cuts the helix — every other
+#: thread here defaults to ``modelled: false``, which is a plain pocket. So the
+#: one geometry in the kernel that makes ninety faces at a stroke was absent
+#: from the sweeps entirely, and with it the case that matters: whether all
+#: those faces can be added beside a pocket wall without renumbering it.
+#:
+#: The cavity and its blended uprights are therefore as much the point as the
+#: thread. ``test_threads.py`` already asserts a thread leaves other faces
+#: alone, but it asserts it against a bare pad — six faces, none of which can
+#: split — so the assertion had nothing to bite on.
+#:
+#: Positions are fractions of ``w`` and ``h`` so a sweep scales the layout
+#: rather than sliding the tap into the cavity, which would be a legitimate
+#: topology change rather than drift.
+TAPPED_CAVITY: dict[str, Any] = {
+    "schema": "cadsheet/1",
+    "project": "tapped block with a blended cavity",
+    "parameters": [
+        {"name": "w", "value": 60.0},
+        {"name": "h", "value": 44.0},
+        {"name": "t", "value": 18.0},
+        {"name": "rad", "value": 4.0},
+        {"name": "cav_d", "value": 8.0},
+        {"name": "tap_deep", "value": 10.0},
+    ],
+    "datums": {"top": {"type": "plane", "origin": [0, 0, "t"], "normal": [0, 0, 1]}},
+    "sketches": {
+        "outline": _rect("outline", "w", "h"),
+        "cavity": {
+            **_rect("cavity", "w / 2", "h / 2", "w / 4", "h / 4"),
+            "plane": "top",
+        },
+        "bores": {
+            "plane": "top",
+            # Both sit in the margin the cavity leaves, on opposite sides, so
+            # neither can meet it however the plate is stretched.
+            "points": {"tap": ["w / 8", "h / 2"], "vent": ["7 * w / 8", "h / 2"]},
+            "curves": [],
+            "loops": [],
+        },
+    },
+    "features": [
+        {"id": "block", "type": "pad", "profile": "outline.outer", "length": "t"},
+        {
+            "id": "cav",
+            "type": "pocket",
+            "profile": "cavity.outer",
+            "depth": "cav_d",
+            "direction": "-normal",
+        },
+        {
+            "id": "uprights",
+            "type": "fillet",
+            "radius": "rad",
+            "edges": "cav/wall[*] ^ cav/wall[*]",
+        },
+        {
+            "id": "m8",
+            "type": "thread",
+            "at": "bores.tap",
+            "standard": "M8",
+            "depth": "tap_deep",
+            "direction": "-normal",
+            "internal": True,
+            "modelled": True,
+        },
+        # After the thread on purpose: a feature downstream of a hundred new
+        # faces is where an index shift would surface.
+        {
+            "id": "vent",
+            "type": "hole",
+            "at": "bores.vent",
+            "diameter": "cav_d",
+            "through_all": True,
+            "direction": "-normal",
+        },
+    ],
+}
+
+
 @dataclass(frozen=True)
 class Case:
     """One document, and what may be done to it.
@@ -346,5 +428,20 @@ SUITE: tuple[Case, ...] = (
         WEDGE_AND_NOTCH,
         ("span", "rise", "t", "rad", "bevel", "block"),
         ("span", "rise", "t", "rad", "bevel", "block"),
+    ),
+    Case(
+        "tapped cavity",
+        TAPPED_CAVITY,
+        # `tap_deep` is deliberately absent. A shorter thread has fewer turns
+        # and so genuinely fewer flank faces, which renames its own fragments —
+        # the same kind of honest topology change as a pocket cut deep enough to
+        # break through. What must not move is everything that is *not* the
+        # thread, and that is asserted directly in
+        # test_a_deeper_thread_leaves_the_cavity_alone.
+        #
+        # Shorter than the others earn regardless: every rebuild here cuts a
+        # real helix, seconds rather than milliseconds.
+        ("w", "t", "rad"),
+        ("w", "h", "t", "rad", "cav_d", "tap_deep"),
     ),
 )

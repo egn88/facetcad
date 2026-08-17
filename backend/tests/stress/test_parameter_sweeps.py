@@ -29,13 +29,25 @@ from facet.adapters.geometry.occt import OcctKernel
 from facet.application.recompute import RecomputeResult, recompute
 from facet.domain.document import Document
 
-from .documents import SUITE, Case
+from .documents import SUITE, TAPPED_CAVITY, Case
 
 pytestmark = pytest.mark.occt
 
 #: Multipliers applied to one parameter at a time. Deliberately modest and
 #: awkward — round numbers can hide an ordering bug that ties would expose.
 MULTIPLIERS = (0.83, 1.0, 1.27)
+
+#: Every document, with the one that cuts a helix marked. A sweep over it is
+#: tens of real thread cuts, so `-m "not slow"` leaves it out while iterating.
+#: Marked here rather than per test, because all seven tests below sweep it.
+CASES = [
+    pytest.param(
+        case,
+        id=case.name,
+        marks=[pytest.mark.slow] if case.name == "tapped cavity" else [],
+    )
+    for case in SUITE
+]
 
 
 @pytest.fixture(scope="module")
@@ -74,7 +86,7 @@ def describe(result: RecomputeResult) -> list[str]:
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("case", SUITE, ids=[entry.name for entry in SUITE])
+@pytest.mark.parametrize("case", CASES)
 def test_the_baseline_builds(
     kernel: OcctKernel, case: Case
 ) -> None:
@@ -83,7 +95,7 @@ def test_the_baseline_builds(
     assert tags(result), f"{case.name} produced no named faces"
 
 
-@pytest.mark.parametrize("case", SUITE, ids=[entry.name for entry in SUITE])
+@pytest.mark.parametrize("case", CASES)
 def test_no_name_moves_when_one_parameter_changes(
     kernel: OcctKernel, case: Case
 ) -> None:
@@ -100,7 +112,7 @@ def test_no_name_moves_when_one_parameter_changes(
             )
 
 
-@pytest.mark.parametrize("case", SUITE, ids=[entry.name for entry in SUITE])
+@pytest.mark.parametrize("case", CASES)
 def test_no_name_moves_when_every_parameter_changes_at_once(
     kernel: OcctKernel, case: Case
 ) -> None:
@@ -127,7 +139,7 @@ def test_no_name_moves_when_every_parameter_changes_at_once(
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("case", SUITE, ids=[entry.name for entry in SUITE])
+@pytest.mark.parametrize("case", CASES)
 def test_rebuilding_the_same_document_is_identical(
     kernel: OcctKernel, case: Case
 ) -> None:
@@ -139,7 +151,7 @@ def test_rebuilding_the_same_document_is_identical(
     ]
 
 
-@pytest.mark.parametrize("case", SUITE, ids=[entry.name for entry in SUITE])
+@pytest.mark.parametrize("case", CASES)
 def test_a_round_trip_through_a_parameter_returns_the_same_model(
     kernel: OcctKernel, case: Case
 ) -> None:
@@ -158,7 +170,7 @@ def test_a_round_trip_through_a_parameter_returns_the_same_model(
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("case", SUITE, ids=[entry.name for entry in SUITE])
+@pytest.mark.parametrize("case", CASES)
 def test_every_selector_in_the_document_keeps_resolving(
     kernel: OcctKernel, case: Case
 ) -> None:
@@ -183,7 +195,7 @@ def test_every_selector_in_the_document_keeps_resolving(
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("case", SUITE, ids=[entry.name for entry in SUITE])
+@pytest.mark.parametrize("case", CASES)
 def test_a_zero_dimension_fails_loudly(
     kernel: OcctKernel, case: Case
 ) -> None:
@@ -195,3 +207,59 @@ def test_a_zero_dimension_fails_loudly(
     for parameter in case.dimensions:
         result = build(kernel, case.document, **{parameter: 0.0})
         assert not result.ok, f"{case.name}: {parameter}=0 built without complaint"
+
+
+# --------------------------------------------------------------------------
+# A modelled thread, next to faces that can split
+# --------------------------------------------------------------------------
+
+
+def _without_thread(result: RecomputeResult) -> list[str]:
+    """Every name that is not the thread's, ordinals stripped.
+
+    Stripped rather than kept, so a wall that split into a different number of
+    fragments shows up as a changed *count* of the same name — which is the
+    shape the failure actually took.
+    """
+    return sorted(
+        str(face.tag).split("#")[0]
+        for body in result.bodies
+        if body.solid is not None
+        for face in body.solid.topology.faces
+        if not str(face.tag).startswith("m8/thread")
+    )
+
+
+@pytest.fixture(scope="module")
+def cavity_without_thread(kernel: OcctKernel) -> list[str]:
+    """Built once. Every rebuild of this document cuts a real helix."""
+    return _without_thread(build(kernel, TAPPED_CAVITY))
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("deep", [6.0, 12.7, 15.0], ids=lambda v: f"{v:g}mm")
+def test_a_deeper_thread_leaves_the_cavity_alone(
+    kernel: OcctKernel, cavity_without_thread: list[str], deep: float
+) -> None:
+    """Change how far the helix reaches; the cavity keeps its wall count.
+
+    The thread's own fragments are expected to change — a longer thread has more
+    turns and honestly more flanks, which is why ``tap_deep`` is not in this
+    document's sweep. What must not change is anything else, and "anything else"
+    here includes a pocket wall and two blended uprights that *can* split.
+
+    ``test_threads.py`` makes the same claim against a bare pad. Six faces, none
+    of which can split, so the assertion passed without ever being tested.
+
+    Note what this still cannot see. Like every test in this module it compares
+    two builds by the same kernel, so a change that moves *both* leaves it
+    green — verified against the thread-tool regression described in
+    ``test_kernel_baseline.py``, which this test does not catch and that one
+    does. The two are complements, not overlapping.
+    """
+    result = build(kernel, TAPPED_CAVITY, tap_deep=deep)
+
+    assert result.ok, f"tap_deep={deep:g}: {describe(result)}"
+    assert _without_thread(result) == cavity_without_thread, (
+        f"a thread {deep:g}mm deep renamed or re-split a face that is not the thread"
+    )
