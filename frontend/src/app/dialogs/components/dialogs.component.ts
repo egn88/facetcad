@@ -77,9 +77,17 @@ export class ModalComponent {
         <div class="mono" [class.ok-text]="result.ok" [class.error-text]="!result.ok">
           {{ result.error ?? summary() }}
         </div>
+        @if (result.note) {
+          <div class="note-text">{{ result.note }}</div>
+        }
         <ul class="result-list">
-          @for (tag of result.matched; track tag) {
-            <li>{{ tag }}</li>
+          @for (row of rows(); track row.tag) {
+            <li>
+              {{ row.tag }}
+              @if (row.body) {
+                <span class="body-tag">{{ row.body }}</span>
+              }
+            </li>
           }
         </ul>
       }
@@ -87,7 +95,14 @@ export class ModalComponent {
       <button footer (click)="closed.emit()">Close</button>
     </cad-modal>
   `,
-  styles: [`.ok-text { color: var(--ok); } .error-text { color: var(--error); }`],
+  styles: [
+    `
+      .ok-text { color: var(--ok); }
+      .error-text { color: var(--error); }
+      .note-text { color: var(--text-dim); margin-top: 0.35rem; }
+      .body-tag { color: var(--text-faint); margin-left: 0.5rem; }
+    `,
+  ],
 })
 export class SelectorConsoleComponent {
   private readonly api = inject(CadApiService);
@@ -106,9 +121,30 @@ export class SelectorConsoleComponent {
     });
   }
 
+  /** Matches with the body that owns each, so a tag is never shown unattributed.
+   *
+   * Labelled only where there is more than one body to tell apart: on a
+   * single-part model the name would be the same word against every row.
+   */
+  readonly rows = computed(() => {
+    const result = this.preview();
+    if (!result) return [];
+    const attributed = result.bodies?.length > 1;
+    const owner = new Map<string, string>();
+    for (const body of result.bodies ?? []) {
+      for (const tag of body.matched) owner.set(tag, body.id);
+    }
+    return result.matched.map((tag) => ({
+      tag,
+      body: attributed ? (owner.get(tag) ?? '') : '',
+    }));
+  });
+
   summary(): string {
     const count = this.preview()?.count ?? 0;
-    return `${count} match${count === 1 ? '' : 'es'}`;
+    const bodies = this.preview()?.bodies?.length ?? 0;
+    const matches = `${count} match${count === 1 ? '' : 'es'}`;
+    return bodies > 1 ? `${matches} across ${bodies} bodies` : matches;
   }
 
   onInput(value: string): void {

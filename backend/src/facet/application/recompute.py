@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import pickle
+import re
 import threading
 import time
 from collections.abc import Mapping, Sequence
@@ -181,6 +182,17 @@ class RecomputeResult:
     @property
     def topology(self) -> TopologyIndex:
         return self.solid.topology if self.solid else TopologyIndex()
+
+    def topologies(self) -> tuple[tuple[str, TopologyIndex], ...]:
+        """Every body's named geometry, in document order.
+
+        The honest counterpart to :attr:`topology`, which reads through to the
+        first body and so answers for a two-part document as though the second
+        part had no faces. Anything asking "what is named in this model" wants
+        this one; ``topology`` remains for the callers that predate bodies and
+        mean the first.
+        """
+        return tuple((body.id, body.topology) for body in self.bodies)
 
     @property
     def last_good_feature(self) -> str | None:
@@ -462,7 +474,7 @@ class RecomputeEngine:
                         id=spec.id,
                         type=spec.type,
                         status=FeatureStatus.FAILED,
-                        error=_contextualise(error, spec.id),
+                        error=_contextualise(error, spec.id, document, body.id),
                         warnings=notes,
                         duration_ms=(time.perf_counter() - started) * 1000,
                     )
@@ -863,13 +875,70 @@ def _reregister_frames(
         naming.register_frame(spec.id, frame)
 
 
-def _contextualise(error: FacetCADError, feature: str) -> FacetCADError:
+#: The feature part of a tag, which is everything before the first ``/``.
+#: Matched rather than parsed because the text may be a face selector, an edge
+#: selector or a union of them, and all that is wanted from it is which
+#: features it names.
+_TAG_FEATURE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*/")
+
+
+def _contextualise(
+    error: FacetCADError,
+    feature: str,
+    document: Document | None = None,
+    body: str | None = None,
+) -> FacetCADError:
     """Attach the failing feature to errors that did not already name one."""
-    if isinstance(error, SelectorResolutionError) and error.feature is None:
-        return replace(error, feature=feature)
+    if isinstance(error, SelectorResolutionError):
+        if error.feature is None:
+            error = replace(error, feature=feature)
+        if document is not None and error.actual == 0:
+            elsewhere = _named_in_other_bodies(document, error.selector, body)
+            if elsewhere:
+                error = replace(error, reasons=(*error.reasons, _across_bodies(elsewhere)))
+        return error
     if isinstance(error, FeatureBuildError):
         return error
     return FeatureBuildError(feature=feature, reason=str(error), cause=error)
+
+
+def _named_in_other_bodies(
+    document: Document, selector: str, body: str | None
+) -> dict[str, list[str]]:
+    """Features the selector names that belong to some other body.
+
+    Read off the document rather than off geometry, because at the point this
+    is asked the other body may not have been built — and because a feature id
+    is unique across the whole document, so which body owns it is a fact the
+    document already holds.
+    """
+    named = set(_TAG_FEATURE.findall(selector))
+    if not named:
+        return {}
+    return {
+        other.id: [spec.id for spec in other.features if spec.id in named]
+        for other in document.bodies
+        if other.id != body and any(spec.id in named for spec in other.features)
+    }
+
+
+def _across_bodies(elsewhere: Mapping[str, Sequence[str]]) -> str:
+    """Why a selector naming a real face still resolved to nothing.
+
+    This is the one failure whose message would otherwise send the reader to
+    fix something that is not wrong: the tag is spelled correctly, the face
+    exists, and it is simply in another part. Bodies never see each other's
+    solids, so a feature can only name faces its own body made.
+    """
+    parts = [
+        f"{', '.join(repr(name) for name in sorted(features))} in body {body!r}"
+        for body, features in sorted(elsewhere.items())
+    ]
+    return (
+        f"the selector names {'; '.join(parts)}, and a feature resolves only within "
+        "its own body — bodies never see each other's solids. Move the feature into "
+        "that body, or select a face this one made."
+    )
 
 
 def recompute(

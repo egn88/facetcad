@@ -191,12 +191,24 @@ export interface TopologiesPayload {
   bodies: BodyTopology[];
 }
 
+export interface BodyMatches {
+  id: string;
+  matched: string[];
+  count: number;
+}
+
 export interface ResolvePreview {
   selector: string;
   matched: string[];
   count: number;
   ok: boolean;
   error: string | null;
+  /** Which body each match came from — a feature can only use its own body's. */
+  bodies: BodyMatches[];
+  /** The body the query was narrowed to, when it was. */
+  body: string | null;
+  /** True and worth knowing, without being an error: matches spanning bodies. */
+  note: string | null;
 }
 
 export interface KernelInfo {

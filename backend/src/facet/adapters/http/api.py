@@ -151,6 +151,14 @@ class ResolvePayload(BaseModel):
     between: list[str] | None = Field(
         default=None, description="Two face patterns, for edges between them"
     )
+    body: str | None = Field(
+        default=None,
+        description=(
+            "Resolve within one body only — the question a feature asks, since "
+            "it can never name a face another body made. Omit it to search the "
+            "whole document."
+        ),
+    )
 
 
 class DocumentPayload(BaseModel):
@@ -521,9 +529,25 @@ def recompute(
 
 
 @router.get("/projects/{project_id}/topology", summary="Every current face and edge tag")
-def topology(project_id: str) -> dict[str, object]:
+def topology(
+    project_id: str,
+    body: str | None = Query(
+        default=None,
+        description=(
+            "Narrow to one body. Without it every body is listed, each tag "
+            "carrying the body that made it."
+        ),
+    ),
+) -> dict[str, object]:
+    """Every tag the model currently has, across every body.
+
+    It answered for the first body until the document grew a second one, at
+    which point half an assembly had no faces as far as any caller could see.
+    Each entry now names its body; ``/topologies`` is the same information
+    grouped, for a client drawing a tree.
+    """
     try:
-        return service().topology(project_id).to_dict()
+        return service().topology_payload(project_id, body)
     except Exception as error:
         raise _fail(error) from error
 
@@ -670,13 +694,22 @@ def get_mesh(project_id: str) -> dict[str, object]:
 
 @router.post("/projects/{project_id}/resolve", summary="Preview what a selector matches")
 def resolve(project_id: str, payload: ResolvePayload) -> dict[str, object]:
+    """What a selector matches now, per body, without writing anything.
+
+    Searches the whole document and says which body each match came from. A
+    feature resolves only within its own body, so ``body`` narrows this to the
+    question a feature would ask — and an answer of nothing always says why,
+    rather than leaving a correct tag looking like a typo.
+    """
     try:
         if payload.between is not None and len(payload.between) == 2:
             preview = service().resolve_edge_selector(
-                project_id, payload.between[0], payload.between[1]
+                project_id, payload.between[0], payload.between[1], payload.body
             )
         elif payload.selector:
-            preview = service().resolve_selector(project_id, payload.selector, payload.kind)
+            preview = service().resolve_selector(
+                project_id, payload.selector, payload.kind, payload.body
+            )
         else:
             raise HTTPException(
                 status_code=400, detail={"message": "provide 'selector' or 'between'"}
@@ -761,7 +794,7 @@ def export(
 
         if fmt in exporters.SHEET_FORMATS:
             result = api.recompute(project_id)
-            content = _sheet_bytes(fmt, document, result)
+            content = _sheet_bytes(fmt, document, result, api.topology_payload(project_id))
             return Response(
                 content=content,
                 media_type=exporters.SHEET_FORMATS[fmt],
@@ -1021,13 +1054,16 @@ def _mesh_bytes(fmt: str, tessellation, name: str) -> bytes:
     return exporters.obj_text(tessellation, name)
 
 
-def _sheet_bytes(fmt: str, document: Document, result) -> bytes:
+def _sheet_bytes(fmt: str, document: Document, result, topology: dict[str, object]) -> bytes:
     if fmt == "csv":
         return exporters.parameters_csv(document, result.parameters)
     if fmt == "json":
         return exporters.parameters_json(document, result.parameters)
     if fmt == "topology":
-        return exporters.topology_json(result.topology)
+        # The whole document's naming, not the first body's: this file is the
+        # offline copy of what /topology answers, and the two disagreeing on an
+        # assembly is how a cutting list ends up missing a part.
+        return exporters.topology_json(topology)
     return yaml_text(document).encode()
 
 

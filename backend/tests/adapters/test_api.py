@@ -286,6 +286,63 @@ def test_resolve_reports_a_selector_that_matches_nothing(bracket_client: TestCli
     ).json()
     assert body["ok"] is False
     assert body["count"] == 0
+    # And says something. A zero with no error reads exactly like a typo, which
+    # is how a correct selector gets rewritten into a wrong one.
+    assert body["error"]
+
+
+def test_a_near_miss_is_offered_the_tags_that_do_exist(bracket_client: TestClient) -> None:
+    """Tags are provenance paths, so most misses are one character out.
+
+    `base/cap` is not a face; `base/cap+` and `base/cap-` are. Saying so costs
+    nothing and is the difference between one round trip and several.
+    """
+    body = bracket_client.post(
+        "/api/projects/bracket/resolve", json={"selector": "base/cap"}
+    ).json()
+
+    assert body["ok"] is False
+    assert "base/cap+" in body["error"]
+
+
+def test_a_face_that_was_consumed_says_which_feature_took_it(client: TestClient) -> None:
+    """The retired list holds the answer, and the preview never used to read it.
+
+    A wider pad swallows the first one, so `base/cap+` genuinely stops existing.
+    "Resolved to nothing" invites a search for a spelling mistake; naming the
+    feature that consumed it ends the question.
+    """
+    document = copy.deepcopy(BRACKET)
+    document["sketches"]["wide"] = {
+        "plane": "base",
+        "points": {
+            "w0": [-10, -10],
+            "w1": ["plate_w + 10", -10],
+            "w2": ["plate_w + 10", "plate_h + 10"],
+            "w3": [-10, "plate_h + 10"],
+        },
+        "curves": [
+            {"id": "a", "start": "w0", "end": "w1"},
+            {"id": "b", "start": "w1", "end": "w2"},
+            {"id": "c", "start": "w2", "end": "w3"},
+            {"id": "d", "start": "w3", "end": "w0"},
+        ],
+        "loops": [{"id": "outer", "curves": ["a", "b", "c", "d"]}],
+    }
+    document["features"].append(
+        {"id": "wider", "type": "pad", "profile": "wide.outer", "length": "plate_t"}
+    )
+    assert client.post(
+        "/api/projects", json={"id": "swallowed", "document": document}
+    ).status_code == 201
+
+    body = client.post(
+        "/api/projects/swallowed/resolve", json={"selector": "base/cap+"}
+    ).json()
+
+    assert body["ok"] is False
+    assert "consumed" in body["error"]
+    assert "wider" in body["error"]
 
 
 def test_resolve_reports_a_malformed_selector(bracket_client: TestClient) -> None:

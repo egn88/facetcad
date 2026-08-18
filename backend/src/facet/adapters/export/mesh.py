@@ -13,13 +13,12 @@ import csv
 import io
 import json
 import struct
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from facet.application.ports.geometry import Tessellation
 from facet.domain.document import Document
 from facet.domain.math3d import Vec3
 from facet.domain.parameters import ResolvedParameters
-from facet.domain.topology import TopologyIndex
 
 
 def stl_binary(mesh: Tessellation, name: str = "facet") -> bytes:
@@ -124,9 +123,14 @@ def parameters_json(document: Document, resolved: ResolvedParameters | None) -> 
     return json.dumps(payload, indent=2).encode()
 
 
-def topology_json(topology: TopologyIndex) -> bytes:
-    """Every current face and edge tag — the discovery surface for agents."""
-    return json.dumps(topology.to_dict(), indent=2).encode()
+def topology_json(topology: Mapping[str, object]) -> bytes:
+    """Every current face and edge tag — the discovery surface for agents.
+
+    Takes the payload rather than a :class:`TopologyIndex` because a document
+    is more than one body, and an index is one solid's worth of naming. The
+    caller assembles the document-wide answer; this only writes it out.
+    """
+    return json.dumps(topology, indent=2).encode()
 
 
 #: Formats this adapter can write, and their MIME types.

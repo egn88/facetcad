@@ -380,17 +380,37 @@ not happen rather than part of normal use.
 
 ```
 GET /api/projects/{id}/topology    every face and edge tag that exists now
-GET /api/projects/{id}/topologies  the same, per body — see below
+GET /api/projects/{id}/topologies  the same, grouped by body
 GET /api/projects/{id}/state       document, bodies, topologies and sketches in one call
 GET /api/projects/{id}/mesh        triangles, if you need to reason about size
 ```
 
-**On a multi-body document, `/topology` and `/resolve` see the first body
-only.** They read the same single-solid view, so a face on the second body is
-absent rather than reported: a correct tag resolves to nothing with no error,
-which reads exactly like a typo. Use `/topologies` to see every body's tags. A
-feature declared inside a body still resolves that body's faces normally when it
-builds — this is a limitation of the two preview endpoints, not of the model.
+Every tag carries the body that made it, and `?body=` narrows to one.
+
+### Two questions, on an assembly
+
+A **feature resolves only within its own body.** Bodies never see each other's
+solids, so a fillet in the lid can name faces the lid made and nothing else.
+That means there are two different questions to ask a selector, and they have
+different answers:
+
+```
+POST /api/projects/{id}/resolve  {"selector": "shank/cap+"}
+   → does this face exist anywhere, and on which part?
+
+POST /api/projects/{id}/resolve  {"selector": "shank/cap+", "body": "plate"}
+   → will the feature I am about to write in `plate` see it?
+```
+
+The first is how you find a face; the second is what predicts a build. The
+answer carries `bodies`, saying which body each match came from, and a `note`
+when the matches span more than one — a count across two parts is not a count
+any single feature will ever see.
+
+An answer of nothing always says why: that the face was retired and by which
+feature, that it exists but on another body, or which existing tags come
+closest. A bare zero would read exactly like a typo, and the usual response to
+that is to rewrite a selector that was already right.
 
 ## Getting it out
 
@@ -435,6 +455,7 @@ ones:
 | `cannot deterministically order N fragments` | two faces are coincident, usually a pad grown inside another. |
 | `produced N face(s) at a corner` | a blend meets another blend at a shared vertex. Chamfer before filleting. |
 | `duplicate feature id` | ids are unique across the document, not per body. |
+| `resolves only within its own body` | the tag is right and the face is real — it belongs to another part. Move the feature into that body, or select a face this one made. |
 | `the geometry worker was busy` (503, `Retry-After`) | one rebuild runs at a time and yours never started. Wait and repeat it — nothing was changed. |
 | `exceeded 60s and was stopped` (503) | the operation was killed, not refused. Try something simpler; nothing was changed. |
 | `a handle from a worker that no longer exists` (409) | repeat the request verbatim. A rebuild starts from the document, so it will work. |

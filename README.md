@@ -224,6 +224,14 @@ POST /api/projects/{id}/resolve      # what would this selector match?
 
 Ask what exists, ask what a selector would match, *then* write it into the document.
 
+Both answer for the whole document and name the body each face belongs to; `?body=` and
+`{"body": ...}` narrow them to one. That distinction is the one to understand on an
+assembly: a **feature resolves only within its own body**, so the wide answer is how you
+find a face and the narrow one is what predicts a build. A selector that matches nothing
+says why — retired and by which feature, present but on another body, or the closest tags
+that do exist — because a bare zero is indistinguishable from a typo, and the usual
+response to a typo is to rewrite a selector that was already right.
+
 ```http
 GET    /api/projects                        POST   /api/projects
 GET    /api/projects/{id}/document          PUT    /api/projects/{id}/document

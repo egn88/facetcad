@@ -429,3 +429,61 @@ def test_blending_the_whole_run_of_edges_succeeds(kernel: OcctKernel) -> None:
     result = recompute(document, kernel)
     assert result.ok, [o.error for o in result.failures()]
     assert len(FaceSelector.parse("soften/chamfer[*]").resolve(result.topology)) == 8
+
+
+# --------------------------------------------------------------------------
+# Blends across bodies
+#
+# Bodies never see each other's solids, so a blend can only name edges its own
+# body made. That is the design; what made it expensive was the message, which
+# said the selector resolved to nothing and left the reader to discover that the
+# face exists, is spelled correctly, and is simply in another part.
+# --------------------------------------------------------------------------
+
+
+def two_bodies_with(edges: str) -> Document:
+    """A plate and a post, with a fillet in the plate naming `edges`."""
+    data = copy.deepcopy(PLATE)
+    data["bodies"] = [
+        {"id": "plate", "features": list(data.pop("features"))},  # type: ignore[arg-type]
+        {
+            "id": "post",
+            "features": [
+                {"id": "stud", "type": "pad", "profile": "outline.outer", "length": "rad"}
+            ],
+        },
+    ]
+    data["bodies"][0]["features"].append(  # type: ignore[index]
+        {"id": "round", "type": "fillet", "radius": "rad", "edges": edges}
+    )
+    return Document.from_dict(data)
+
+
+def test_a_blend_naming_another_body_says_which_body_has_those_faces(
+    kernel: OcctKernel,
+) -> None:
+    """The tag is right and the face exists — in the other part.
+
+    Every other reading of "resolved to nothing" points at the selector, so
+    without this the next move is to rewrite something that was already correct.
+    """
+    result = recompute(two_bodies_with("stud/cap+ ^ stud/side[*]"), kernel)
+
+    failure = next(o for o in result.outcomes if o.status == FeatureStatus.FAILED)
+    reason = str(failure.error)
+    assert "'stud'" in reason
+    assert "body 'post'" in reason
+    assert "resolves only within its own body" in reason
+
+
+def test_a_blend_naming_its_own_body_is_not_second_guessed(kernel: OcctKernel) -> None:
+    """The note belongs only where it explains something.
+
+    A selector that fails inside its own body has an ordinary cause, and adding
+    a body to that message would send the reader looking for a part that has
+    nothing to do with it.
+    """
+    result = recompute(two_bodies_with("base/cap+ ^ ghost/side[*]"), kernel)
+
+    failure = next(o for o in result.outcomes if o.status == FeatureStatus.FAILED)
+    assert "own body" not in str(failure.error)

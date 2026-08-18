@@ -321,48 +321,96 @@ def test_one_body_can_be_asked_for_by_name(tools: MCPServer[Any], api: FakeApi) 
         call(tools, "topology", project="assembly", body="ghost")
 
 
-def test_a_selector_that_names_another_body_is_told_so_rather_than_left_wrong(
+def test_which_body_a_match_came_from_survives_the_hop(
     tools: MCPServer[Any], api: FakeApi
 ) -> None:
-    """The API resolves against the first body, and a face on the second is simply absent.
+    """A tag says what a face is, not which part it is on.
 
-    Zero matches on a tag that plainly exists reads as "you typed it wrong",
-    and an agent that believes that rewrites a selector that was already right.
+    On an assembly that is the difference between a selector a feature can use
+    and one it cannot, so the attribution the API now returns has to arrive.
     """
     api.on(
         "POST",
         "/api/projects/assembly/resolve",
-        json={"selector": "shank/cap+", "matched": [], "count": 0, "ok": False, "error": None},
+        json={
+            "selector": "*/cap+",
+            "matched": ["slab/cap+", "shank/cap+"],
+            "count": 2,
+            "ok": True,
+            "error": None,
+            "bodies": [
+                {"id": "plate", "matched": ["slab/cap+"], "count": 1},
+                {"id": "pin", "matched": ["shank/cap+"], "count": 1},
+            ],
+            "body": None,
+            "note": "these faces are on 2 bodies ('plate', 'pin').",
+        },
     )
-    api.on("GET", "/api/projects/assembly/topologies", json=two_bodies())
 
-    result = call(tools, "resolve_selector", project="assembly", selector="shank/cap+")
+    result = call(tools, "resolve_selector", project="assembly", selector="*/cap+")
 
-    assert result["count"] == 0
-    assert "'pin'" in result["note"]
-    assert "first body" in result["note"]
+    assert [entry["id"] for entry in result["bodies"]] == ["plate", "pin"]
+    assert "2 bodies" in result["note"]
 
 
-def test_a_selector_that_matches_costs_no_second_request(
+def test_a_single_body_answer_does_not_repeat_the_body_at_every_level(
     tools: MCPServer[Any], api: FakeApi
 ) -> None:
-    """The hint is worth a round trip only where it changes what happens next."""
+    """Attribution earns its space only where there is something to attribute."""
+    api.on(
+        "POST",
+        "/api/projects/bracket/resolve",
+        json={
+            "selector": "base/cap+",
+            "matched": ["base/cap+"],
+            "count": 1,
+            "ok": True,
+            "error": None,
+            "bodies": [{"id": "main", "matched": ["base/cap+"], "count": 1}],
+            "body": None,
+            "note": None,
+        },
+    )
+
+    result = call(tools, "resolve_selector", project="bracket", selector="base/cap+")
+
+    assert "bodies" not in result
+    assert "note" not in result
+
+
+def test_a_scoped_resolve_asks_the_question_a_feature_asks(
+    tools: MCPServer[Any], api: FakeApi
+) -> None:
+    """A feature resolves within its own body, so that is the check worth having.
+
+    The document-wide answer finds a face; only the scoped one predicts whether
+    the feature about to be written will build.
+    """
     api.on(
         "POST",
         "/api/projects/assembly/resolve",
         json={
-            "selector": "slab/cap+",
-            "matched": ["slab/cap+"],
-            "count": 1,
-            "ok": True,
-            "error": None,
+            "selector": "shank/cap+",
+            "matched": [],
+            "count": 0,
+            "ok": False,
+            "error": "no face matches 'shank/cap+' in body 'plate', but body 'pin' has it.",
+            "bodies": [],
+            "body": "plate",
+            "note": None,
         },
     )
 
-    result = call(tools, "resolve_selector", project="assembly", selector="slab/cap+")
+    result = call(
+        tools, "resolve_selector", project="assembly", selector="shank/cap+", body="plate"
+    )
 
-    assert "note" not in result
-    assert [request.url.path for request in api.seen] == ["/api/projects/assembly/resolve"]
+    assert result["ok"] is False
+    assert "body 'pin' has it" in result["error"]
+    assert result["body"] == "plate"
+
+    sent = json.loads(api.seen[-1].content)
+    assert sent["body"] == "plate"
 
 
 def test_an_ignored_option_is_reported_rather_than_left_silent(

@@ -139,6 +139,92 @@ def test_each_body_has_its_own_named_geometry(client: TestClient) -> None:
     assert not any(f["tag"].startswith("shaft/") for f in plate["faces"])
 
 
+# --------------------------------------------------------------------------
+# Finding a face on an assembly
+#
+# Discovery used to answer for the first body, which on a single-part document
+# is the same thing and on an assembly means half the model has no faces as far
+# as any caller can see. The failure was silent — a correct tag came back
+# matching nothing, with no error — so the natural response was to rewrite a
+# selector that was right, which never works.
+# --------------------------------------------------------------------------
+
+
+def test_the_topology_covers_every_body_and_says_which_is_which(client: TestClient) -> None:
+    """A tag says what a face is; the body says which part it is on.
+
+    Both are needed: one to write the selector, the other to know which body the
+    feature using it has to live in, and which part to export.
+    """
+    payload = client.get("/api/projects/asm/topology").json()
+    by_tag = {f["tag"]: f["body"] for f in payload["faces"]}
+
+    assert by_tag["slab/cap+"] == "plate"
+    assert by_tag["shaft/cap+"] == "pin"
+    assert payload["bodies"] == ["plate", "pin"]
+
+
+def test_the_topology_can_be_narrowed_to_one_body(client: TestClient) -> None:
+    """The question a feature asks: what does *my* body have?"""
+    payload = client.get("/api/projects/asm/topology?body=pin").json()
+
+    assert payload["bodies"] == ["pin"]
+    assert all(entry["body"] == "pin" for entry in payload["faces"])
+    assert not any(entry["tag"].startswith("slab/") for entry in payload["faces"])
+
+
+def test_an_unknown_body_is_refused_with_the_ones_that_exist(client: TestClient) -> None:
+    response = client.get("/api/projects/asm/topology?body=ghost")
+    assert response.status_code == 422
+    assert "plate, pin" in str(response.json()["detail"])
+
+
+def test_a_selector_finds_a_face_on_the_second_body(client: TestClient) -> None:
+    """This is the one that was silently wrong.
+
+    `shaft/cap+` is a real face of a real part. Answering zero and stopping made
+    it indistinguishable from a typo.
+    """
+    body = client.post(
+        "/api/projects/asm/resolve", json={"selector": "shaft/cap+"}
+    ).json()
+
+    assert body["ok"] is True
+    assert body["matched"] == ["shaft/cap+"]
+    assert body["bodies"] == [{"id": "pin", "matched": ["shaft/cap+"], "count": 1}]
+
+
+def test_matches_spread_across_bodies_say_so(client: TestClient) -> None:
+    """A count that spans two parts is not a count any one feature will see."""
+    body = client.post("/api/projects/asm/resolve", json={"selector": "*/cap+"}).json()
+
+    assert {entry["id"] for entry in body["bodies"]} == {"plate", "pin"}
+    assert "own body" in body["note"]
+
+
+def test_resolving_within_one_body_answers_what_a_feature_would_see(
+    client: TestClient,
+) -> None:
+    """The scoped question, and the reason the wide answer is not enough.
+
+    A feature declared in `plate` cannot name a face `pin` made, so a preview
+    that searched the whole document would promise a build that then fails.
+    """
+    body = client.post(
+        "/api/projects/asm/resolve", json={"selector": "shaft/cap+", "body": "plate"}
+    ).json()
+
+    assert body["ok"] is False
+    assert body["body"] == "plate"
+    assert "body 'pin' has it" in body["error"]
+
+
+def test_the_topology_export_carries_every_body_too(client: TestClient) -> None:
+    """The file is the offline copy of the same answer, and used to be half of it."""
+    payload = client.get("/api/projects/asm/export?fmt=topology").json()
+    assert {entry["body"] for entry in payload["faces"]} == {"plate", "pin"}
+
+
 def test_feature_ids_may_repeat_across_bodies(client: TestClient) -> None:
     """Bodies partition the namespace, so tags cannot collide between them."""
     data = copy.deepcopy(TWO_BODIES)

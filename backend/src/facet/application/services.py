@@ -18,6 +18,7 @@ import sys
 from array import array
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from difflib import get_close_matches
 
 from facet.domain.body import Body, Placement
 from facet.domain.datum import DatumPlane
@@ -33,7 +34,8 @@ from facet.domain.math3d import Frame, Vec3
 from facet.domain.parameters import Parameter, ResolvedParameters
 from facet.domain.selectors import EdgeSelector, FaceSelector
 from facet.domain.sketch import Sketch
-from facet.domain.topology import TopologyIndex
+from facet.domain.tags import FaceTag
+from facet.domain.topology import RetiredTag, TopologyIndex
 
 from .datum_proposal import DatumProposal, propose_datum_for_face
 from .enclosure import enclosure_for_bounds, enclosure_panels
@@ -79,12 +81,29 @@ OFFSET_PARAMETER_TOLERANCE = 1e-6
 
 
 @dataclass(frozen=True)
+class BodyMatches:
+    """What one body contributed to a selector's matches."""
+
+    id: str
+    matched: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return {"id": self.id, "matched": list(self.matched), "count": len(self.matched)}
+
+
+@dataclass(frozen=True)
 class ResolvePreview:
     """What a selector would match right now — without committing to it.
 
     Exposed over the API because it is the difference between an agent that can
     use this system and one that has to guess: ask what a selector matches,
     then write it into the document.
+
+    ``matched`` is the union across every body and ``bodies`` says which body
+    each match came from. The distinction is not cosmetic: the preview answers
+    for the whole document, and a *feature* resolves only within its own body,
+    so a caller about to write a selector into one needs to know whether the
+    faces it found are in that body or in a different part.
     """
 
     selector: str
@@ -92,6 +111,13 @@ class ResolvePreview:
     count: int
     ok: bool
     error: str | None = None
+    #: Per body, in document order; only bodies that matched something.
+    bodies: tuple[BodyMatches, ...] = ()
+    #: The body this was narrowed to, when it was.
+    body: str | None = None
+    #: Something true and worth knowing about an answer that is not an error —
+    #: matches spread across bodies, most usefully.
+    note: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -100,6 +126,9 @@ class ResolvePreview:
             "count": self.count,
             "ok": self.ok,
             "error": self.error,
+            "bodies": [entry.to_dict() for entry in self.bodies],
+            "body": self.body,
+            "note": self.note,
         }
 
 
@@ -320,8 +349,56 @@ class ProjectService:
         """
         return self.recompute(project_id, Detail.FULL)
 
-    def topology(self, project_id: str) -> TopologyIndex:
-        return self.recompute(project_id).topology
+    def topology(
+        self, project_id: str, body: str | None = None
+    ) -> tuple[tuple[str, TopologyIndex], ...]:
+        """Named geometry per body, narrowed to one when asked.
+
+        Answers for the whole document. It used to answer for the first body,
+        which on a single-part model is the same thing and on an assembly means
+        the second part has no faces as far as any caller can see — a selector
+        written against one of them then resolves to nothing with nothing to say
+        about why, which is indistinguishable from a typo.
+        """
+        return self._indexes(self.recompute(project_id), body)
+
+    def _indexes(
+        self, result: RecomputeResult, body: str | None
+    ) -> tuple[tuple[str, TopologyIndex], ...]:
+        found = tuple(
+            entry for entry in result.topologies() if body is None or entry[0] == body
+        )
+        if body is not None and not found:
+            names = ", ".join(entry.id for entry in result.bodies) or "no bodies"
+            raise DocumentError(
+                reason=f"no body named {body!r}; this document has {names}", path="bodies"
+            )
+        return found
+
+    def topology_payload(self, project_id: str, body: str | None = None) -> dict[str, object]:
+        """The tags on the wire, each carrying the body that made it.
+
+        One flat listing rather than a nesting per body, because a tag is what a
+        selector is written from and the body is a property of it — and because
+        every caller that reads ``faces[].tag`` keeps working while gaining the
+        part of the answer it was previously missing.
+        """
+        indexes = self.topology(project_id, body)
+        faces: list[dict[str, object]] = []
+        edges: list[dict[str, object]] = []
+        retired: list[dict[str, object]] = []
+        for name, index in indexes:
+            payload = index.to_dict()
+            for key, rows in (
+                ("faces", faces), ("edges", edges), ("retired", retired),
+            ):
+                rows.extend({**entry, "body": name} for entry in payload[key])  # type: ignore[union-attr]
+        return {
+            "faces": faces,
+            "edges": edges,
+            "retired": retired,
+            "bodies": [name for name, _ in indexes],
+        }
 
     def mesh(
         self,
@@ -930,40 +1007,174 @@ class ProjectService:
 
     # -- selector preview --------------------------------------------------
 
-    def resolve_selector(self, project_id: str, text: str, kind: str = "faces") -> ResolvePreview:
-        """Answer 'what would this match?' without changing anything."""
-        topology = self.topology(project_id)
+    def resolve_selector(
+        self, project_id: str, text: str, kind: str = "faces", body: str | None = None
+    ) -> ResolvePreview:
+        """Answer 'what would this match?' without changing anything.
+
+        Searches every body unless narrowed to one, and says which body each
+        match came from. Narrowing is how you ask the question a *feature* asks:
+        a feature resolves only within the body it is declared in, so the
+        document-wide answer is the right one for finding a face and the scoped
+        one is the right one for checking a selector you are about to write.
+        """
+        result = self.recompute(project_id)
+        scope = self._indexes(result, body)
         try:
             face_selector = FaceSelector.parse(text)
             if kind == "edges":
                 # "every edge touching a face that matches this pattern"
-                selector = EdgeSelector(touching=face_selector.include)
-                matched = [str(e.tag) for e in selector.candidates(topology)]
+                selector: FaceSelector | EdgeSelector = EdgeSelector(
+                    touching=face_selector.include
+                )
             else:
-                matched = [str(e.tag) for e in face_selector.candidates(topology)]
+                selector = face_selector
+            per_body = self._matches_per_body(selector, scope)
         except FacetCADError as error:
             return ResolvePreview(
-                selector=text, matched=(), count=0, ok=False, error=str(error)
+                selector=text, matched=(), count=0, ok=False, error=str(error), body=body
             )
-        return ResolvePreview(
-            selector=text, matched=tuple(matched), count=len(matched), ok=bool(matched)
-        )
+        return self._preview(text, kind, per_body, result, body, selector)
 
-    def resolve_edge_selector(self, project_id: str, first: str, second: str) -> ResolvePreview:
-        topology = self.topology(project_id)
+    def resolve_edge_selector(
+        self, project_id: str, first: str, second: str, body: str | None = None
+    ) -> ResolvePreview:
+        result = self.recompute(project_id)
+        scope = self._indexes(result, body)
         selector = EdgeSelector.between_patterns(first, second)
         try:
-            matched = [str(e.tag) for e in selector.candidates(topology)]
+            per_body = self._matches_per_body(selector, scope)
         except FacetCADError as error:
             return ResolvePreview(
-                selector=selector.describe(), matched=(), count=0, ok=False, error=str(error)
+                selector=selector.describe(),
+                matched=(),
+                count=0,
+                ok=False,
+                error=str(error),
+                body=body,
+            )
+        return self._preview(selector.describe(), "edges", per_body, result, body, selector)
+
+    def _matches_per_body(
+        self,
+        selector: FaceSelector | EdgeSelector,
+        scope: Sequence[tuple[str, TopologyIndex]],
+    ) -> list[BodyMatches]:
+        """`candidates` rather than `resolve`, per body.
+
+        A selector naming a face of one body must not fail merely because
+        another body has no such face — the same reason the cut-path export
+        gathers candidates body by body. Whether nothing matched anywhere is
+        decided once, afterwards.
+        """
+        found = []
+        for name, index in scope:
+            tags = tuple(str(entry.tag) for entry in selector.candidates(index))
+            if tags:
+                found.append(BodyMatches(id=name, matched=tags))
+        return found
+
+    def _preview(
+        self,
+        text: str,
+        kind: str,
+        per_body: Sequence[BodyMatches],
+        result: RecomputeResult,
+        body: str | None,
+        selector: FaceSelector | EdgeSelector,
+    ) -> ResolvePreview:
+        matched = tuple(tag for entry in per_body for tag in entry.matched)
+        if not matched:
+            return ResolvePreview(
+                selector=text,
+                matched=(),
+                count=0,
+                ok=False,
+                error=self._why_nothing_matched(text, kind, result, body, selector),
+                body=body,
+            )
+        note = None
+        if len(per_body) > 1:
+            names = ", ".join(repr(entry.id) for entry in per_body)
+            note = (
+                f"these faces are on {len(per_body)} bodies ({names}). A feature "
+                "resolves only within its own body, so narrow this to the body you "
+                "are writing into before trusting the count."
             )
         return ResolvePreview(
-            selector=selector.describe(),
-            matched=tuple(matched),
+            selector=text,
+            matched=matched,
             count=len(matched),
-            ok=bool(matched),
+            ok=True,
+            bodies=tuple(per_body),
+            body=body,
+            note=note,
         )
+
+    def _why_nothing_matched(
+        self,
+        text: str,
+        kind: str,
+        result: RecomputeResult,
+        body: str | None,
+        selector: FaceSelector | EdgeSelector,
+    ) -> str:
+        """Say what is actually wrong, rather than answering zero and stopping.
+
+        A preview that matches nothing and cannot explain itself is the one
+        answer this system is not supposed to give: it reads exactly like a
+        typo, so the caller rewrites a selector that may have been right all
+        along. Between the retired list, the other bodies and the tags that do
+        exist, there is nearly always something better to say than "0".
+        """
+        what = "edge" if kind == "edges" else "face"
+        where = f" in body {body!r}" if body else ""
+        head = f"no {what} matches {text!r}{where}"
+
+        if body is not None:
+            others = [
+                entry
+                for entry in self._matches_per_body(
+                    selector, [e for e in result.topologies() if e[0] != body]
+                )
+            ]
+            if others:
+                names = ", ".join(repr(entry.id) for entry in others)
+                return (
+                    f"{head}, but body {names} has it. A feature resolves only within "
+                    "its own body, so this face is reachable from a feature declared "
+                    "there and from nowhere else."
+                )
+
+        for name, index in result.topologies():
+            retired = self._retirement(index, text)
+            if retired is not None:
+                return f"{head}: {retired.describe()} (body {name!r})"
+
+        near = get_close_matches(
+            text,
+            [
+                str(entry.tag)
+                for _, index in result.topologies()
+                for entry in (index.edges if kind == "edges" else index.faces)
+            ],
+            n=3,
+            cutoff=0.6,
+        )
+        if near:
+            return f"{head}. The closest that exist are {', '.join(repr(t) for t in near)}"
+        return (
+            f"{head}, and nothing close to it exists. Read the topology for the tags "
+            "this model currently has; a tag is a provenance path, not a name you choose."
+        )
+
+    @staticmethod
+    def _retirement(index: TopologyIndex, text: str) -> RetiredTag | None:
+        """Whether this exact tag is one the model used to have."""
+        try:
+            return index.retirement_of(FaceTag.parse(text))
+        except FacetCADError:
+            return None  # a pattern rather than a tag, so nothing to look up
 
     # -- internals ---------------------------------------------------------
 

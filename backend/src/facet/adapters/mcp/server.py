@@ -84,9 +84,10 @@ Read the report: `warnings` names an option a feature type ignored, and a
 `bypassed` feature is one that failed and was allowed to.
 
 A document may hold several bodies, each with its own history and each exported
-separately. Ask `topology` for a named body's tags — selectors are resolved
-against the first body only, so a tag from another one is invisible to
-`resolve_selector`.
+separately. `topology` and `resolve_selector` answer for the whole document and
+say which body each face is on; pass `body=` to ask what one part sees. A
+feature resolves only within its own body and can never name a face another body
+made — that boundary is the thing to keep in view when working on an assembly.
 
 `guide` returns the full manual — selector syntax, a worked two-part enclosure,
 and the mistakes that cost a rebuild — for when this is all you have been given.
@@ -1155,8 +1156,9 @@ def topology(
     changes.
 
     A document with more than one body answers per body, because a tag tells you
-    what a face is but not which part it is on — and that is what you need for
-    `export(body=...)`. A single-body document answers flat.
+    what a face is but not which part it is on — and that is what you need both
+    for `export(body=...)` and for knowing which body a feature using it has to
+    live in. A single-body document answers flat.
 
     `retired` lists tags that existed in an earlier state and no longer do, with
     the reason and the feature that consumed them. When a selector has just
@@ -1212,6 +1214,15 @@ def resolve_selector(
         list[str] | None,
         Field(description="Two face patterns, to select the edges that separate them"),
     ] = None,
+    body: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Resolve within one body only — the question a feature asks. "
+                "Omit it to search the whole document."
+            )
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """Ask what a selector would match — without committing it to the document.
 
@@ -1220,78 +1231,52 @@ def resolve_selector(
     fails the build, so the cheap move is always to check it here first, look at
     `matched`, and only then write it in.
 
-    `ok` is false when the selector matched nothing, with `error` explaining
-    why. Nothing is changed either way.
+    Two answers, and they are different questions:
 
-    **Resolution runs against the first body only.** In a multi-body document a
-    tag belonging to any other body matches nothing here even though the face
-    exists, so a `count` of zero on a tag you read from `topology` is worth
-    checking against `note` before you go looking for the mistake in the
-    selector.
+    * without `body`, the whole document — "does this face exist, and where".
+      `bodies` says which body each match came from.
+    * with `body`, that body alone — "will the feature I am about to write see
+      this". A feature resolves only within the body it is declared in and can
+      never name a face another body made, so this is the one that predicts a
+      build.
+
+    `ok` is false when nothing matched, and `error` then says why rather than
+    leaving you to guess: that the face was retired and by which feature, that
+    it exists but on another body, or which existing tags come closest. Nothing
+    is changed either way.
     """
     payload: dict[str, Any] = {"kind": kind}
     if between is not None:
         payload["between"] = between
     if selector is not None:
         payload["selector"] = selector
+    if body is not None:
+        payload["body"] = body
 
     notes: list[str] = []
-    body = client().json("POST", _project(project) + "/resolve", json=payload)
-    matched = [str(tag) for tag in _rows(body.get("matched"))]
-    answer: dict[str, Any] = {
-        "selector": body.get("selector"),
-        "ok": body.get("ok"),
-        "count": body.get("count", len(matched)),
+    answer = client().json("POST", _project(project) + "/resolve", json=payload)
+    matched = [str(tag) for tag in _rows(answer.get("matched"))]
+    result: dict[str, Any] = {
+        "selector": answer.get("selector"),
+        "ok": answer.get("ok"),
+        "count": answer.get("count", len(matched)),
         "matched": _cap(matched, "matched", notes),
-        "error": body.get("error"),
+        "error": answer.get("error"),
     }
-    if not matched:
-        hint = _other_body(project, selector, between)
-        if hint:
-            answer["note"] = hint
-    return _with_notes(answer, notes)
-
-
-def _other_body(
-    project: str, selector: str | None, between: Sequence[str] | None
-) -> str | None:
-    """Whether the tags that did not match exist on some other body.
-
-    "Resolved nothing" and "resolved nothing *here*" send an agent to opposite
-    places, and the API cannot tell them apart: it resolves against the first
-    body, and a face on the second is simply absent. Rather than let a correct
-    tag read as a typo, this looks — only on the failure path, where a second
-    request is cheap next to the rebuild it saves.
-    """
-    wanted = [text for text in ([selector] if selector else list(between or [])) if text]
-    if not wanted:
-        return None
-    try:
-        bodies = _bodies_of(project)
-    except ToolError:  # pragma: no cover - a hint is never worth failing over
-        return None
-    if len(bodies) <= 1:
-        return None
-
-    first = str(bodies[0].get("id"))
-    stems = {text.split("/")[0].strip() for text in wanted if "*" not in text.split("/")[0]}
-    elsewhere = sorted(
-        {
-            str(entry.get("id"))
-            for entry in bodies[1:]
-            for face in _rows(entry.get("faces"))
-            if str(face.get("tag")).split("/")[0] in stems
-        }
-    )
-    if not elsewhere:
-        return None
-    return (
-        f"those faces are on body {', '.join(repr(name) for name in elsewhere)}, and "
-        f"selectors here are resolved against the first body ({first!r}) only — the "
-        "tag is right, the resolver cannot see it. Use topology(body=...) to read "
-        "that body's tags; a feature declared inside that body still resolves them "
-        "normally when it builds."
-    )
+    bodies = [
+        {"id": entry.get("id"), "count": entry.get("count"), "matched": entry.get("matched")}
+        for entry in _rows(answer.get("bodies"))
+        if isinstance(entry, Mapping)
+    ]
+    # Only where it says something: on a single-body document the attribution is
+    # the same word repeated, and the flat list is the whole answer.
+    if len(bodies) > 1:
+        result["bodies"] = bodies
+    if answer.get("body"):
+        result["body"] = answer["body"]
+    if answer.get("note"):
+        result["note"] = answer["note"]
+    return _with_notes(result, notes)
 
 
 @server.tool()
