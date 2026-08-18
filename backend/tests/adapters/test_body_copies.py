@@ -464,6 +464,97 @@ def test_a_copy_of_a_body_that_did_not_build_says_so(client: TestClient) -> None
     assert "leg" in str(copy["error"])
 
 
+# --------------------------------------------------------------------------
+# Renaming, annotating, and replacing the whole document
+# --------------------------------------------------------------------------
+
+
+def update(client: TestClient, body: str, **payload: object) -> dict:
+    answer = client.patch(f"/api/projects/table/bodies/{body}", json=payload)
+    assert answer.status_code == 200, answer.text
+    return answer.json()
+
+
+def test_a_body_can_be_renamed(client: TestClient) -> None:
+    build = update(client, "leg", id="post")
+    assert [b["id"] for b in build["bodies"]] == ["post"]
+
+
+def test_renaming_a_body_follows_its_copies(client: TestClient) -> None:
+    """A copy left pointing at an id that no longer exists is the silent break."""
+    copy_of(client)
+    copy_of(client)
+    build = update(client, "leg", id="post")
+    assert result_body(build, "leg_2")["of"] == "post"
+    assert result_body(build, "post")["quantity"] == 3
+    assert build["ok"] is True
+
+
+def test_renaming_a_body_invalidates_no_selector(client: TestClient) -> None:
+    """A tag names the features that made a face, never the body they sit in."""
+    before = client.get("/api/projects/table/topology").json()
+    update(client, "leg", id="post")
+    after = client.get("/api/projects/table/topology").json()
+    assert [f["tag"] for f in after["faces"]] == [f["tag"] for f in before["faces"]]
+
+
+def test_a_rename_onto_an_existing_id_is_refused(client: TestClient) -> None:
+    copy_of(client)
+    refused = client.patch("/api/projects/table/bodies/leg", json={"id": "leg_2"})
+    assert refused.status_code >= 400
+
+
+def test_a_body_can_carry_a_note(client: TestClient) -> None:
+    update(client, "leg", doc="the front legs, printed in PETG")
+    written = next(b for b in document(client)["bodies"] if b["id"] == "leg")
+    assert written["doc"] == "the front legs, printed in PETG"
+
+
+def test_annotating_a_body_does_not_move_it(client: TestClient) -> None:
+    """Only what is sent is applied, so one edit cannot undo another."""
+    update(client, "leg", origin=[10, 0, 0])
+    build = update(client, "leg", doc="a note")
+    assert result_body(build, "leg")["placement"][12] == 10.0
+
+
+def test_moving_a_body_does_not_clear_its_note(client: TestClient) -> None:
+    update(client, "leg", doc="a note")
+    update(client, "leg", origin=[10, 0, 0])
+    written = next(b for b in document(client)["bodies"] if b["id"] == "leg")
+    assert written["doc"] == "a note"
+
+
+def test_an_update_that_says_nothing_changes_nothing(client: TestClient) -> None:
+    build = update(client, "leg")
+    assert build["ok"] is True
+    assert result_body(build, "leg")["placement"][12] == 0.0
+
+
+def test_replacing_the_whole_document_reports_the_rebuild(client: TestClient) -> None:
+    """The broadest edit is the one most worth checking.
+
+    It used to answer with a row count and a timestamp, so the only way to learn
+    that a rewrite had broken the model was to ask again.
+    """
+    copy_of(client)
+    written = document(client)
+    build = client.put("/api/projects/table/document", json={"document": written})
+
+    assert build.status_code == 200, build.text
+    answer = build.json()
+    assert answer["ok"] is True
+    assert answer["parts"] == [{"body": "leg", "quantity": 2}]
+    assert [b["id"] for b in answer["bodies"]] == ["leg", "leg_2"]
+
+
+def test_replacing_a_document_that_does_not_build_says_so(client: TestClient) -> None:
+    broken = document(client)
+    broken["bodies"][0]["features"][0]["profile"] = "leg.nosuchloop"
+    answer = client.put("/api/projects/table/document", json={"document": broken})
+    # Either refused outright or reported as a failed build — never a silent ok.
+    assert answer.status_code >= 400 or answer.json()["ok"] is False
+
+
 class _CountingKernel(FakeKernel):
     """A kernel that says how often it was asked to tessellate."""
 

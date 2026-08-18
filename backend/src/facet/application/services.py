@@ -208,12 +208,23 @@ class ProjectService:
     def load(self, project_id: str) -> Document:
         return self._repository.load(project_id)
 
-    def replace_document(self, project_id: str, document: Document) -> ProjectSummary:
-        """Import a whole document — the 'clone onto another station' path."""
+    def replace_document(self, project_id: str, document: Document) -> RecomputeResult:
+        """Import a whole document — the 'clone onto another station' path.
+
+        Rebuilds and reports, like every other edit. It used to save, invalidate
+        and hand back a project summary: a row count and a timestamp, with
+        nothing about whether the model it had just accepted still built. That
+        made the broadest edit in the system the only one you could not check —
+        an agent rewriting a document was told the write succeeded and had to
+        make a second call to find out it had broken the model.
+
+        The cache is still dropped first. Every feature in the incoming document
+        is new as far as this engine is concerned, and a stale entry keyed on an
+        id the replacement reuses would answer for the wrong shape.
+        """
         document.validate()
-        summary = self._repository.save(project_id, document)
         self._engine(project_id).invalidate()
-        return summary
+        return self._persist_and_rebuild(project_id, document)
 
     # -- editing -----------------------------------------------------------
 
@@ -682,11 +693,34 @@ class ProjectService:
         return chosen, self._persist_and_rebuild(project_id, document)
 
     def update_body(
-        self, project_id: str, identifier: str, placement: Placement
+        self,
+        project_id: str,
+        identifier: str,
+        placement: Placement | None = None,
+        *,
+        name: str | None = None,
+        doc: str | None = None,
     ) -> RecomputeResult:
+        """Change a body's placement, its id, or the note attached to it.
+
+        Each argument is applied only when given, so moving a body does not
+        clear its documentation and renaming one does not move it.
+
+        A rename is the reason this takes more than a placement. It is safe in a
+        way a parameter rename is not: a tag names the features that made a
+        face, never the body they live in, so no selector anywhere can be
+        invalidated by it. What does name a body is a copy, and those are
+        followed.
+        """
         document = self._repository.load(project_id)
+        if name is not None and name != identifier:
+            document.rename_body(identifier, name)
+            identifier = name
         body = document.body(identifier)
-        body.placement = placement
+        if placement is not None:
+            body.placement = placement
+        if doc is not None:
+            body.doc = doc
         return self._persist_and_rebuild(project_id, document)
 
     def delete_body(self, project_id: str, identifier: str) -> RecomputeResult:

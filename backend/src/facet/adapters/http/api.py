@@ -124,6 +124,21 @@ class BodyPayload(BaseModel):
     rotation: list[Any] = Field(default_factory=lambda: [0, 0, 0])
 
 
+class BodyUpdate(BaseModel):
+    """A change to a body. Only what is sent is applied."""
+
+    id: str | None = Field(
+        default=None, description="A new id for the body; copies of it are followed"
+    )
+    origin: list[Any] | None = Field(
+        default=None, description="[x, y, z]; expressions allowed"
+    )
+    rotation: list[Any] | None = Field(
+        default=None, description="[rx, ry, rz] in degrees"
+    )
+    doc: str | None = Field(default=None, description="A note about what this part is")
+
+
 class CopyPayload(BaseModel):
     """Where a copy of a body goes, and optionally what to call it."""
 
@@ -691,15 +706,29 @@ def duplicate_body(
     return {"id": identifier, **result.to_dict()}
 
 
-@router.patch("/projects/{project_id}/bodies/{body_id}", summary="Move a body")
-def update_body(project_id: str, body_id: str, payload: BodyPayload) -> dict[str, object]:
-    """Set a body's placement. Parameter expressions are accepted."""
+@router.patch(
+    "/projects/{project_id}/bodies/{body_id}", summary="Move, rename or annotate a body"
+)
+def update_body(project_id: str, body_id: str, payload: BodyUpdate) -> dict[str, object]:
+    """Change a body's placement, its id, or its note. Expressions are accepted.
+
+    Every field is optional and only what is sent is applied, so moving a body
+    cannot clear its note and renaming one cannot move it.
+    """
     try:
-        placement = Placement(
-            origin=tuple(payload.origin),  # type: ignore[arg-type]
-            rotation=tuple(payload.rotation),  # type: ignore[arg-type]
+        placement = (
+            Placement(
+                origin=tuple(payload.origin or [0, 0, 0]),
+                rotation=tuple(payload.rotation or [0, 0, 0]),
+            )
+            if payload.origin is not None or payload.rotation is not None
+            else None
         )
-        return service().update_body(project_id, body_id, placement).to_dict()
+        return (
+            service()
+            .update_body(project_id, body_id, placement, name=payload.id, doc=payload.doc)
+            .to_dict()
+        )
     except Exception as error:
         raise _fail(error) from error
 

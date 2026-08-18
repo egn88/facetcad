@@ -604,8 +604,11 @@ def replace_document(
     that does not parse leaves the existing one untouched. What it is *not* is a
     substitute for the editing tools: rewriting a whole document to change one
     number loses the feature-by-feature verdict that says which edit broke what.
+
+    Returns the rebuild, in the same shape `recompute` does — so a document you
+    have just written can be checked in the call that wrote it.
     """
-    return dict(
+    return _build_report(
         client().json(
             "PUT",
             _project(project) + "/document",
@@ -1135,6 +1138,8 @@ def move_body(
 
     A copy made by `duplicate_body` is placed with this too — that is the whole
     of what distinguishes one copy from another.
+
+    To rename a body or annotate it, use `update_body`.
     """
     return _build_report(
         client().json(
@@ -1146,6 +1151,56 @@ def move_body(
                 "rotation": rotation if rotation is not None else [0, 0, 0],
             },
         )
+    )
+
+
+@server.tool()
+def update_body(
+    project: Project,
+    body: Annotated[str, Field(description="Id of the body to change")],
+    rename_to: Annotated[
+        str | None, Field(description="A new id for it; copies of it are followed")
+    ] = None,
+    doc: Annotated[
+        str | None, Field(description="A note about what this part is")
+    ] = None,
+    origin: Annotated[
+        list[float | str] | None,
+        Field(description="[x, y, z]; expressions allowed, e.g. ['outer_w + 10', 0, 0]"),
+    ] = None,
+    rotation: Annotated[
+        list[float | str] | None, Field(description="[rx, ry, rz] in degrees")
+    ] = None,
+) -> dict[str, Any]:
+    """Change a body's id, its note, or where it sits — then rebuild.
+
+    Only what you pass is applied, so annotating a body does not move it and
+    moving one does not clear its note.
+
+    **Renaming is safe here in a way renaming a parameter is not.** A tag names
+    the *features* that made a face — `shaft/cap+` — and never the body they
+    live in, so no selector anywhere can be invalidated by a body rename. What
+    does name a body is a copy of it, and those are followed for you.
+
+    Use `move_body` when placement is all you are changing; it is the same
+    operation with a name that says so.
+    """
+    payload: dict[str, Any] = {}
+    if rename_to is not None:
+        payload["id"] = rename_to
+    if doc is not None:
+        payload["doc"] = doc
+    if origin is not None:
+        payload["origin"] = origin
+    if rotation is not None:
+        payload["rotation"] = rotation
+    if not payload:
+        raise ToolError(
+            f"nothing to change on body '{body}'. Pass rename_to, doc, origin or "
+            "rotation — an update that says nothing would rebuild for no reason."
+        )
+    return _build_report(
+        client().json("PATCH", f"{_project(project)}/bodies/{body}", json=payload)
     )
 
 

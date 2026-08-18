@@ -68,6 +68,30 @@ class Document:
         index = next(i for i, b in enumerate(self.bodies) if b.id == identifier)
         return self.bodies.pop(index)
 
+    def rename_body(self, old: str, new: str) -> None:
+        """Rename a body and follow the change into everything naming it.
+
+        Only copies name a body, so this is a short list today — but it is the
+        same rule a parameter rename follows, and leaving a copy pointing at an
+        id that no longer exists would break the document silently, which is the
+        one outcome this project exists to prevent.
+
+        Feature ids, selectors and tags are untouched: a tag is a provenance
+        path through the *features* that made a face, and the body it lives in
+        is not part of its name. Renaming a body therefore cannot invalidate a
+        single selector, which is why this is safe to offer at all.
+        """
+        if old == new:
+            return
+        body = self.body(old)  # raises if unknown
+        if any(b.id == new for b in self.bodies):
+            raise DuplicateIdError(kind="body", identifier=new)
+        if not new.isidentifier():
+            raise DocumentError(reason=f"body id {new!r} must be an identifier")
+        for copy in self.copies_of(old):
+            copy.of = new
+        body.id = new
+
     def copies_of(self, identifier: str) -> list[Body]:
         """Bodies that show ``identifier``'s solid at their own placement."""
         return [body for body in self.bodies if body.of == identifier]

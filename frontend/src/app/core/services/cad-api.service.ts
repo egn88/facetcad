@@ -131,9 +131,16 @@ export class CadApiService {
     );
   }
 
-  putDocumentYaml(id: string, yaml: string): Promise<ProjectSummary> {
+  /**
+   * Replace the whole document, and get the rebuild that followed.
+   *
+   * A build result rather than a project summary: the broadest edit in the
+   * system is the one most worth checking, and a row count cannot say whether
+   * the model still builds.
+   */
+  putDocumentYaml(id: string, yaml: string): Promise<BuildResult> {
     return firstValueFrom(
-      this.http.put<ProjectSummary>(`${BASE}/projects/${id}/document`, { yaml }),
+      this.http.put<BuildResult>(`${BASE}/projects/${id}/document`, { yaml }),
     );
   }
 

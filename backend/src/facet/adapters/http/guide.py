@@ -24,7 +24,7 @@ paths.
 
 Base URL for everything below: `/api`. Full schema at `/openapi.json`.
 
-If your client speaks MCP, this same server exposes it at `/mcp` — 38 typed tools
+If your client speaks MCP, this same server exposes it at `/mcp` — 39 typed tools
 over everything described here, so you can skip the URL building. `GET /mcp.json`
 returns the client configuration for this deployment, addressed to whatever
 hostname you reached it at, so nothing has to be checked out or guessed.
@@ -363,6 +363,16 @@ Rules, all of them refusals with a message rather than surprises:
   write applies to all four.
 - **Placement is the only thing a copy has of its own.** `move_body` places one
   like any other body.
+
+### Renaming a body is safe
+
+`update_body` changes a body's id, its note, or where it sits, and applies only
+what you pass — annotating a body does not move it.
+
+A rename is safe in a way renaming a parameter is not. A tag names the
+*features* that made a face — `shaft/cap+` — and never the body they live in, so
+no selector anywhere can be invalidated by it. The one thing that does name a
+body is a copy of it, and those are followed for you.
 
 ## A pattern for each thing you will be asked for
 

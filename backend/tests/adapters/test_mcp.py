@@ -391,6 +391,61 @@ def test_a_model_of_one_offs_is_not_cluttered_with_counts(
     assert "of" not in result["bodies"][0]
 
 
+def test_a_body_can_be_renamed_over_mcp(tools: MCPServer[Any], api: FakeApi) -> None:
+    api.on(
+        "PATCH",
+        "/api/projects/table/bodies/leg",
+        json={
+            "ok": True,
+            "features": [],
+            "parameters": {},
+            "parts": [{"body": "post", "quantity": 1}],
+            "bodies": [{"id": "post", "ok": True, "faceCount": 6, "of": None, "quantity": 1}],
+        },
+    )
+
+    result = call(tools, "update_body", project="table", body="leg", rename_to="post")
+
+    assert result["ok"] is True
+    assert result["bodies"][0]["id"] == "post"
+    sent = json.loads(api.seen[-1].content)
+    # Only what was asked for: an update that also sent a placement would move a
+    # body the caller only meant to rename.
+    assert sent == {"id": "post"}
+
+
+def test_an_update_naming_nothing_to_change_is_refused(
+    tools: MCPServer[Any], api: FakeApi
+) -> None:
+    """Rebuilding for an edit that says nothing is work nobody asked for."""
+    with pytest.raises(ToolError, match="nothing to change"):
+        call(tools, "update_body", project="table", body="leg")
+
+
+def test_replacing_a_document_answers_with_the_rebuild(
+    tools: MCPServer[Any], api: FakeApi
+) -> None:
+    """So a document you have just written can be checked in the call that wrote it."""
+    api.on(
+        "PUT",
+        "/api/projects/table/document",
+        json={
+            "ok": False,
+            "features": [
+                {"id": "shaft", "type": "pad", "status": "failed",
+                 "error": {"kind": "SelectorResolutionError", "message": "resolved to nothing"}}
+            ],
+            "parameters": {},
+            "bodies": [{"id": "leg", "ok": False, "faceCount": 0}],
+        },
+    )
+
+    result = call(tools, "replace_document", project="table", document={"schema": "cadsheet/1"})
+
+    assert result["ok"] is False
+    assert [f["id"] for f in result["failures"]] == ["shaft"]
+
+
 def test_which_body_a_match_came_from_survives_the_hop(
     tools: MCPServer[Any], api: FakeApi
 ) -> None:

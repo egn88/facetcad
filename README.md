@@ -289,7 +289,16 @@ GET    /api/projects/{id}/export/enclosure?thickness=
 
 ```http
 POST   /api/projects/{id}/bodies/{bid}/copies   # the same solid, placed again
+PATCH  /api/projects/{id}/bodies/{bid}          # move, rename or annotate a body
 ```
+
+Renaming a body is safe: a tag names the features that made a face, never the body
+they live in, so no selector can be invalidated by it. Copies pointing at the old id
+are followed.
+
+`PUT /document` replaces a whole document and answers with the rebuild, in the same
+shape `/recompute` returns — the broadest edit in the system is the one most worth
+checking, and it used to hand back a row count and a timestamp.
 
 Bodies, sketches and datums are edited through endpoints of the same shape; `/openapi.json`
 has the full set.
@@ -367,7 +376,7 @@ cd backend && .venv/bin/pip install -e ".[mcp]"
 FACET_URL=http://localhost:8080/api .venv/bin/python -m facet.mcp
 ```
 
-Both drive the same 38 tools. The extra is optional and the API boots without it — it
+Both drive the same 39 tools. The extra is optional and the API boots without it — it
 simply serves no MCP endpoint, which is what `FACET_INSTALL=.[occt]` gets you.
 
 ### Reading the docs instead
@@ -410,11 +419,11 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) and [DESIGN.md](DESIGN.md).
 ## Tests
 
 ```bash
-cd backend && .venv/bin/python -m pytest        # 1099 tests, ~85 s with OCCT installed
+cd backend && .venv/bin/python -m pytest        # 1112 tests, ~85 s with OCCT installed
 cd frontend && npm test                        # 25 tests, chain naming stability
 ```
 
-Without the OCCT extra, 303 of those drop out and the remaining 796 — naming, selectors,
+Without the OCCT extra, 303 of those drop out and the remaining 809 — naming, selectors,
 recompute, the whole domain — run on the analytic kernel in about fifteen seconds.
 
 The conformance suite runs twice — once per kernel — so OCCT and the analytic kernel are
