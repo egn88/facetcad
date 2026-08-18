@@ -15,7 +15,7 @@ import {
   signal,
 } from '@angular/core';
 
-import type { FeatureView } from '../../core/models/cad.models';
+import type { BodyGroup } from '../../core/models/cad.models';
 
 @Component({
   selector: 'cad-feature-tree',
@@ -42,12 +42,31 @@ import type { FeatureView } from '../../core/models/cad.models';
               {{ group.twisty }}
             </button>
             {{ group.body }}
-            <span class="count">{{ group.features.length }}</span>
+            @if (group.copyOf) {
+              <span class="copy" [title]="group.copyTitle">copy of {{ group.copyOf }}</span>
+            } @else {
+              <span class="count">{{ group.features.length }}</span>
+            }
+            @if (group.quantityLabel) {
+              <span class="quantity" [title]="group.quantityTitle">{{ group.quantityLabel }}</span>
+            }
             <span class="spacer"></span>
+            <button
+              title="Show this body again at another placement — one build, edited once"
+              (click)="duplicate(group.body, $event)"
+            >
+              ⧉
+            </button>
             <button [title]="group.eyeTitle" (click)="toggleVisibility(group.body, $event)">
               {{ group.eye }}
             </button>
-            <button title="Delete this body" (click)="removeBody(group.body, $event)">×</button>
+            <button [title]="group.deleteTitle" (click)="removeBody(group.body, $event)">×</button>
+          </div>
+        }
+        @if (group.copyOf && !group.folded) {
+          <div class="copy-note">
+            Built by <button class="link" (click)="bodyActivated.emit(group.copyOf)">
+              {{ group.copyOf }}</button>. Edit it there and every copy follows.
           </div>
         }
         @for (feature of group.visibleFeatures; track feature.id) {
@@ -101,6 +120,33 @@ import type { FeatureView } from '../../core/models/cad.models';
         cursor: pointer;
       }
       .count { opacity: 0.55; }
+      /* The piece count reads as a fact about the part, so it sits with the
+         name rather than among the buttons that act on it. */
+      .quantity {
+        font-weight: 600;
+        color: var(--accent);
+        opacity: 0.9;
+      }
+      .copy {
+        opacity: 0.55;
+        text-transform: none;
+        letter-spacing: 0;
+      }
+      .copy-note {
+        padding: 4px 10px 4px 26px;
+        font-size: 11px;
+        color: var(--fg-muted, inherit);
+        opacity: 0.7;
+      }
+      .link {
+        background: none;
+        border: none;
+        padding: 0;
+        color: var(--accent);
+        font: inherit;
+        cursor: pointer;
+        text-decoration: underline;
+      }
       /* The same marker the topology list and the feature rows use for
          "this is the one", so there is one vocabulary to learn, not two. */
       .body-head.selected { box-shadow: inset 2px 0 0 var(--accent); }
@@ -109,7 +155,7 @@ import type { FeatureView } from '../../core/models/cad.models';
   ],
 })
 export class FeatureTreeComponent {
-  readonly groups = input.required<{ body: string; features: FeatureView[] }[]>();
+  readonly groups = input.required<BodyGroup[]>();
   readonly selected = input<string | null>(null);
   /** The body being worked on, or null for "all bodies". */
   readonly activeBody = input<string | null>(null);
@@ -121,6 +167,7 @@ export class FeatureTreeComponent {
   readonly bodyDeleted = output<string>();
   readonly bodyActivated = output<string>();
   readonly bodyVisibilityToggled = output<string>();
+  readonly bodyDuplicated = output<string>();
 
   /**
    * Bodies whose features are folded away.
@@ -147,12 +194,28 @@ export class FeatureTreeComponent {
     return this.groups().map((group) => {
       const isHidden = hidden.has(group.body);
       const isFolded = collapsible && folded.has(group.body);
+      // Only worth saying once it is more than one. A model of one-offs
+      // labelled "x1" everywhere is a row of noise to read past.
+      const repeats = group.quantity > 1;
       return {
         body: group.body,
         features: group.features,
         visibleFeatures: isFolded ? [] : group.features,
+        folded: isFolded,
         active: group.body === active,
         hidden: isHidden,
+        copyOf: group.of,
+        copyTitle: group.of
+          ? `The same solid as ${group.of}, placed here. Built once, and edited there.`
+          : '',
+        quantityLabel: repeats ? `x${group.quantity}` : '',
+        quantityTitle: repeats
+          ? `${group.quantity} of this part in the model — how many to produce`
+          : '',
+        deleteTitle: repeats
+          ? `Delete this body — refused while ${group.quantity - 1} ` +
+            `cop${group.quantity === 2 ? 'y' : 'ies'} of it remain`
+          : 'Delete this body',
         eye: isHidden ? '◌' : '◉',
         eyeTitle: isHidden ? 'Show this body' : 'Hide this body',
         twisty: isFolded ? '▸' : '▾',
@@ -176,6 +239,11 @@ export class FeatureTreeComponent {
   toggleVisibility(body: string, event: Event): void {
     event.stopPropagation();
     this.bodyVisibilityToggled.emit(body);
+  }
+
+  duplicate(body: string, event: Event): void {
+    event.stopPropagation();
+    this.bodyDuplicated.emit(body);
   }
 
   removeBody(body: string, event: Event): void {

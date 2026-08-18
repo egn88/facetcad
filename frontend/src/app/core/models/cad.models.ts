@@ -39,8 +39,17 @@ export interface SketchRow {
 
 export interface BodyRow {
   id: string;
-  features: FeatureRow[];
+  /** Absent on a copy, which can never have a history of its own. */
+  features?: FeatureRow[];
   placement?: { origin: (number | string)[]; rotation: (number | string)[] };
+  /**
+   * The body this one copies, when it is a copy.
+   *
+   * A copy holds no features: it shows the named body's solid at its own
+   * placement. Editing the source therefore edits every copy, and the model
+   * records how many of the part it calls for.
+   */
+  of?: string | null;
 }
 
 export interface CadDocument {
@@ -84,8 +93,16 @@ export interface BuildResult {
   bodies: BodyOutcome[];
   features: FeatureOutcome[];
   parameters: Record<string, number>;
+  /** Each distinct part and how many of it the model calls for. */
+  parts: PartCount[];
   lastGoodFeature: string | null;
   error: DomainError | null;
+}
+
+/** How many of a part to produce — what a print run needs to know. */
+export interface PartCount {
+  body: string;
+  quantity: number;
 }
 
 export interface FaceRange {
@@ -106,6 +123,10 @@ export interface FaceRange {
  */
 export interface BodyMesh {
   id: string;
+  /** Set when this body is a copy of another, which drew the same solid. */
+  of: string | null;
+  /** How many pieces of this part the model calls for; 0 on a copy. */
+  quantity: number;
   /** Column-major 4x4. Kept separate from the points so moving a body cannot
    * perturb the geometry the naming engine fingerprints. */
   placement: number[];
@@ -119,6 +140,10 @@ export interface BodyMesh {
 /** A body as `/state` puts it on the wire. */
 export interface PackedBodyMesh {
   id: string;
+  /** Set when this body is a copy of another, which drew the same solid. */
+  of: string | null;
+  /** How many pieces of this part the model calls for; 0 on a copy. */
+  quantity: number;
   placement: number[];
   encoding: string;
   positions: string;
@@ -136,6 +161,10 @@ export interface BodiesPayload {
 
 export interface PlainBodyMesh {
   id: string;
+  /** Set when this body is a copy of another, which drew the same solid. */
+  of: string | null;
+  /** How many pieces of this part the model calls for; 0 on a copy. */
+  quantity: number;
   placement: number[];
   positions: number[];
   normals: number[];
@@ -166,6 +195,13 @@ export interface BodyOutcome {
   placement: number[];
   faceCount: number;
   error: DomainError | null;
+  /** The body this one copies, or null when it builds itself. */
+  of: string | null;
+  /** Ids of the bodies copying this one. Empty on a copy. */
+  copies: string[];
+  /** How many pieces of this body the model calls for; 0 on a copy, which its
+   * source counts, so the quantities sum to the piece count. */
+  quantity: number;
 }
 
 export interface MeshPayload {
@@ -283,6 +319,20 @@ export interface FeatureView {
   statusClass: string;
   faceLabel: string;
   tooltip: string;
+}
+
+/**
+ * One body in the feature tree: its history, and how many of it to make.
+ *
+ * `of` is set on a copy, which has no history of its own — the tree shows it as
+ * a placement of the body named there rather than as an empty part.
+ */
+export interface BodyGroup {
+  body: string;
+  of: string | null;
+  /** Pieces the model calls for; 0 on a copy, which its source counts. */
+  quantity: number;
+  features: FeatureView[];
 }
 
 /** A diagnostic flattened into displayable lines. */

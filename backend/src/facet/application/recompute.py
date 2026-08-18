@@ -33,9 +33,11 @@ from dataclasses import dataclass, field, replace
 from facet.domain.body import Body
 from facet.domain.document import Document
 from facet.domain.errors import (
+    DocumentError,
     FacetCADError,
     FeatureBuildError,
     SelectorResolutionError,
+    UnknownReferenceError,
 )
 from facet.domain.math3d import Frame
 from facet.domain.parameters import ResolvedParameters
@@ -112,6 +114,11 @@ class BodyResult:
     ``placement`` is where the body sits, and is applied for display and export
     only. Keeping it out of the modelled geometry means moving a body can never
     perturb a face fingerprint or a split ordinal.
+
+    A **copy** is this same record holding the source's ``solid`` and ``key``
+    under its own id and its own placement. Nothing downstream has to know:
+    the viewport draws it, the exporter places it, and the mesh cache hits on
+    the shared key, all through the path they already took.
     """
 
     id: str
@@ -119,6 +126,12 @@ class BodyResult:
     outcomes: tuple[FeatureOutcome, ...] = ()
     placement: Frame = field(default_factory=Frame.world)
     error: FacetCADError | None = None
+    #: The body this one copies; None for a body built from its own history.
+    of: str | None = None
+    #: Ids of the bodies copying this one. Empty on a copy — a copy is counted
+    #: by its source, so the quantities across a document sum to the piece
+    #: count instead of double-counting it.
+    copies: tuple[str, ...] = ()
     #: The content key of the state ``solid`` is actually in — the key of the
     #: deepest feature that built, which on a history that stopped early is the
     #: last good one rather than the last declared one.
@@ -136,6 +149,18 @@ class BodyResult:
         )
 
     @property
+    def is_copy(self) -> bool:
+        return self.of is not None
+
+    @property
+    def quantity(self) -> int:
+        """How many pieces of this body the model calls for.
+
+        The number to send to a printer. 0 on a copy, which its source counts.
+        """
+        return 0 if self.is_copy else 1 + len(self.copies)
+
+    @property
     def topology(self) -> TopologyIndex:
         return self.solid.topology if self.solid else TopologyIndex()
 
@@ -147,6 +172,9 @@ class BodyResult:
             "placement": list(self.placement.to_matrix()),
             "faceCount": len(self.topology.faces),
             "error": self.error.as_dict() if self.error else None,
+            "of": self.of,
+            "copies": list(self.copies),
+            "quantity": self.quantity,
         }
 
 
@@ -191,8 +219,28 @@ class RecomputeResult:
         part had no faces. Anything asking "what is named in this model" wants
         this one; ``topology`` remains for the callers that predate bodies and
         mean the first.
+
+        Copies are left out. A copy introduces no name — it shows the source's
+        faces at another placement, so listing it would report every tag once
+        per copy and turn "this face is on four bodies" into the answer to a
+        question nobody asked. Selectors are written against a history, and the
+        history is the source's.
         """
-        return tuple((body.id, body.topology) for body in self.bodies)
+        return tuple(
+            (body.id, body.topology) for body in self.bodies if not body.is_copy
+        )
+
+    @property
+    def parts(self) -> tuple[tuple[str, int], ...]:
+        """Each distinct part and how many of it the model calls for.
+
+        The piece count for a print run: bodies that build themselves, each with
+        the number of times it appears. Copies do not get their own row — they
+        are the count on the row of the body they copy.
+        """
+        return tuple(
+            (body.id, body.quantity) for body in self.bodies if not body.is_copy
+        )
 
     @property
     def last_good_feature(self) -> str | None:
@@ -209,6 +257,7 @@ class RecomputeResult:
             # Flattened across bodies, for callers that predate them.
             "features": [o.to_dict() for o in self.outcomes],
             "parameters": self.parameters.as_dict() if self.parameters else {},
+            "parts": [{"body": name, "quantity": n} for name, n in self.parts],
             "lastGoodFeature": self.last_good_feature,
             "error": self.error.as_dict() if self.error else None,
         }
@@ -363,20 +412,58 @@ class RecomputeEngine:
             # state worth showing, so this is the one whole-document failure.
             return RecomputeResult(error=error)
 
-        bodies: list[BodyResult] = []
+        # Sources first, then copies, so every copy has a built solid to point
+        # at regardless of the order the two were written in. Document order is
+        # restored afterwards: it is what the tree and the exporters show.
+        built: dict[str, BodyResult] = {}
         for body in document.bodies:
-            try:
-                placement = body.placement.resolve(parameters, body.id)
-            except FacetCADError as error:
-                bodies.append(BodyResult(id=body.id, error=error))
+            if body.is_copy:
                 continue
-            bodies.append(
-                self._recompute_body(body, document, parameters, frames, placement, detail)
+            placement = self._placement_of(body, parameters)
+            built[body.id] = (
+                BodyResult(id=body.id, error=placement)
+                if isinstance(placement, FacetCADError)
+                else self._recompute_body(
+                    body, document, parameters, frames, placement, detail
+                )
             )
+
+        for body in document.bodies:
+            if not body.is_copy:
+                continue
+            placement = self._placement_of(body, parameters)
+            if isinstance(placement, FacetCADError):
+                built[body.id] = BodyResult(id=body.id, of=body.of, error=placement)
+                continue
+            built[body.id] = _as_copy(body, built.get(body.of or ""), placement)
+
+        # Each source learns who copies it, so one read of a body answers "how
+        # many of these do I make" without the caller rescanning the document.
+        copies: dict[str, list[str]] = {}
+        for body in document.bodies:
+            if body.is_copy and body.of in built:
+                copies.setdefault(body.of or "", []).append(body.id)
+
+        bodies = [
+            replace(built[body.id], copies=tuple(copies.get(body.id, ())))
+            if not body.is_copy
+            else built[body.id]
+            for body in document.bodies
+            if body.id in built
+        ]
 
         return RecomputeResult(
             bodies=tuple(bodies), parameters=parameters, frames=frames
         )
+
+    def _placement_of(
+        self, body: Body, parameters: ResolvedParameters
+    ) -> Frame | FacetCADError:
+        """Where a body sits, or why that could not be worked out."""
+        try:
+            return body.placement.resolve(parameters, body.id)
+        except FacetCADError as error:
+            return error
 
     def _recompute_body(
         self,
@@ -564,6 +651,10 @@ class RecomputeEngine:
             return False
 
         for body in document.bodies:
+            if body.is_copy:
+                # Nothing of its own to store: it is the source's state, and
+                # the source is checked on its own pass through this loop.
+                continue
             keys = self._key_chain(body, document, parameters, frames)
             final = next((key for key in reversed(keys) if key is not None), None)
             if final is None:
@@ -853,6 +944,55 @@ class RecomputeEngine:
         }
         blob = json.dumps(payload, sort_keys=True, default=str).encode()
         return hashlib.sha256(blob).hexdigest()
+
+
+def _as_copy(body: Body, source: BodyResult | None, placement: Frame) -> BodyResult:
+    """One body's solid, appearing again under another id and placement.
+
+    No kernel call and no cache slot: the solid, its names and its content key
+    are the source's, and only the transform differs. The shared key is what
+    makes the tessellation free too — the mesh cache is keyed on the geometry,
+    so the copy asks for triangles that have already been cut.
+
+    A source whose history did not finish is reported as such on the copy too,
+    pointing at the source rather than restating its feature outcomes. The copy
+    still shows the partial solid — the same fail-loud-but-locally behaviour the
+    source itself gets — but it does not claim to be fine when the thing it
+    copies is not.
+    """
+    if source is None:
+        # Validation rejects a copy of a body that is not there, so reaching
+        # this means the document was built past it. Say so rather than draw
+        # an empty body with no explanation.
+        return BodyResult(
+            id=body.id,
+            of=body.of,
+            placement=placement,
+            error=UnknownReferenceError(
+                kind="body", identifier=body.of or "", referenced_by=body.id
+            ),
+        )
+    return BodyResult(
+        id=body.id,
+        solid=source.solid,
+        of=body.of,
+        placement=placement,
+        key=source.key,
+        error=source.error or _source_unfinished(body, source),
+    )
+
+
+def _source_unfinished(body: Body, source: BodyResult) -> DocumentError | None:
+    """Why a copy of a half-built body is not itself ok."""
+    if source.ok:
+        return None
+    return DocumentError(
+        reason=(
+            f"body {body.id!r} copies {source.id!r}, whose history did not finish "
+            "building. Fix it there and every copy is fixed with it."
+        ),
+        path=f"bodies.{body.id}.of",
+    )
 
 
 def _reregister_frames(

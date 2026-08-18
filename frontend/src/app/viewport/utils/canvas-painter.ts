@@ -88,6 +88,14 @@ export class CanvasPainter {
     context.fillRect(0, 0, width, height);
 
     camera.updateMatrixWorld();
+    // The scene's too, and not only the camera's. Every body hangs under a
+    // group carrying its placement with `matrixAutoUpdate` off, so nothing
+    // recomputes `matrixWorld` unless it is asked to — and the collectors below
+    // read exactly that. WebGL's `render` does this internally, which is why
+    // the omission was invisible there and drew every body stacked at the
+    // origin here: an assembly looked like one part, and a body shown at a
+    // second placement did not appear at all.
+    scene.updateMatrixWorld();
     this.viewProjection.multiplyMatrices(
       camera.projectionMatrix,
       camera.matrixWorldInverse,

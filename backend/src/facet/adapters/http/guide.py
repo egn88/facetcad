@@ -24,7 +24,7 @@ paths.
 
 Base URL for everything below: `/api`. Full schema at `/openapi.json`.
 
-If your client speaks MCP, this same server exposes it at `/mcp` — 37 typed tools
+If your client speaks MCP, this same server exposes it at `/mcp` — 38 typed tools
 over everything described here, so you can skip the URL building. `GET /mcp.json`
 returns the client configuration for this deployment, addressed to whatever
 hostname you reached it at, so nothing has to be checked out or guessed.
@@ -322,6 +322,48 @@ Read what it teaches:
 5. **Each body's features are its own.** A second pad in the same body fuses
    onto what is there.
 
+## A part that appears more than once
+
+Do not build it twice. A body that repeats — four legs, six brackets, a row of
+identical clips — is one body plus **copies** of it:
+
+```json
+"bodies": [
+  {"id": "leg", "features": [
+    {"id": "shaft", "type": "pad", "profile": "leg_profile.outer", "length": "leg_h"}
+  ]},
+  {"id": "leg_2", "of": "leg", "placement": {"origin": ["span_w", 0, 0]}},
+  {"id": "leg_3", "of": "leg", "placement": {"origin": [0, "span_l", 0]}},
+  {"id": "leg_4", "of": "leg", "placement": {"origin": ["span_w", "span_l", 0]}}
+]
+```
+
+`of` names the body this one shows. A copy holds **no features**: it is the same
+solid, at its own placement. Add one with `duplicate_body`, or write `of`
+directly as above.
+
+What that buys, and why the alternative is worse:
+
+| | copy | four pasted histories |
+|---|---|---|
+| change the leg | edit once, all four follow | edit four times, or they drift |
+| rebuild cost | one build, one tessellation | four of each |
+| "how many do I print?" | `parts` says `leg` x4 | count them by eye, hope you are right |
+
+Rules, all of them refusals with a message rather than surprises:
+
+- **A copy holds no features.** `add_feature` against one is refused and names
+  the source. Add it there and every copy gets it.
+- **Copy the body with the history**, not another copy. One hop, so where the
+  geometry comes from always has a one-word answer.
+- **Deleting the source is refused** while copies point at it, and names them.
+  Deleting a copy is always safe.
+- **A copy names no faces of its own.** `topology` and `resolve_selector`
+  answer for the source; ask about `leg`, not `leg_2`, and the selector you
+  write applies to all four.
+- **Placement is the only thing a copy has of its own.** `move_body` places one
+  like any other body.
+
 ## A pattern for each thing you will be asked for
 
 **A screw post** — a pad up from the floor, then a tapped hole down its middle.
@@ -437,10 +479,15 @@ parts a spreadsheet has no way to represent. A bad file is rejected whole, with
 the row number; nothing is half-applied.
 
 **Multi-part models: export each body separately.** Without `body=` the mesh
-holds every body at its placement, which is right for looking at the assembly
-and wrong for a print bed. `body=` gives you one part, named
+holds every body at its placement, copies included, which is right for looking
+at the assembly and wrong for a print bed. `body=` gives you one part, named
 `<project>-<body>.stl`. STEP holds a single solid, so it *requires* `body=` once
-there is more than one and tells you the names.
+there is more than one part and tells you the names — copies do not count
+towards that, since they are the same solid.
+
+**Copies and the piece count.** Export the source once (`body=leg`) and read the
+`parts` list off any build report for how many to make: `leg` x4. That is the
+one number a model built by pasting a history four times cannot give you.
 
 ## When it refuses
 
@@ -452,6 +499,8 @@ ones:
 | `resolved to nothing (found 0)` | a selector matches no face. `GET /topology` and compare. |
 | `expected 4, resolved 6` | the model changed shape under a selector. Narrow it, or accept the new count. |
 | `the pocket removes no material` | almost always `direction`. The sketch is on the far side of the material. |
+| `is a copy of X, so it cannot hold features` | add the feature to X; every copy of it gets the feature. |
+| `is copied by ...` | delete the copies before the body they copy, or they lose their geometry. |
 | `cannot deterministically order N fragments` | two faces are coincident, usually a pad grown inside another. |
 | `produced N face(s) at a corner` | a blend meets another blend at a shared vertex. Chamfer before filleting. |
 | `duplicate feature id` | ids are unique across the document, not per body. |

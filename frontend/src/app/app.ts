@@ -193,6 +193,9 @@ type Dialog =
           <div class="panel-section features">
             <div class="panel-header">
               Features<span class="spacer"></span>
+              @if (store.hasCopies()) {
+                <span class="badge" [title]="partsTitle()">{{ partsLabel() }}</span>
+              }
               <span class="badge">{{ store.featureViews().length }}</span>
               <span class="badge" title="The body new features are added to"
                 >{{ store.activeBodyLabel() }}</span
@@ -211,6 +214,7 @@ type Dialog =
                 (bodyDeleted)="store.deleteBody($event)"
                 (bodyActivated)="store.toggleActiveBody($event)"
                 (bodyVisibilityToggled)="store.toggleBodyVisibility($event)"
+                (bodyDuplicated)="store.duplicateBody($event)"
               />
             </div>
           </div>
@@ -383,7 +387,7 @@ type Dialog =
               [projectId]="id"
               [profiles]="store.profileOptions()"
               [points]="store.pointOptions()"
-              [bodies]="store.bodyIds()"
+              [bodies]="store.editableBodyIds()"
               [activeBody]="store.activeBody()"
               [prefill]="prefill()"
               [editingFeature]="editingFeature()"
@@ -420,6 +424,25 @@ export class App {
   /** The feature the dialog is editing, or null when it is adding a new one. */
   readonly editingFeature = signal<FeatureRow | null>(null);
   readonly editingFeatureBody = signal('');
+
+  /**
+   * The piece count, for a model where something repeats.
+   *
+   * Shown beside the feature count because that is where someone about to
+   * export looks, and because "12 features" and "16 pieces" are different
+   * questions that get confused when only the first is on screen.
+   */
+  readonly partsLabel = computed(() => {
+    const total = this.store.parts().reduce((sum, part) => sum + part.quantity, 0);
+    return `${total} ${total === 1 ? 'piece' : 'pieces'}`;
+  });
+
+  readonly partsTitle = computed(() =>
+    this.store
+      .parts()
+      .map((part) => `${part.body} x${part.quantity}`)
+      .join(', '),
+  );
   private readonly viewport = viewChild<ViewportComponent>('viewport');
   readonly editingParameter = signal<ParameterRow | null>(null);
   readonly editingSketch = signal<string | null>(null);

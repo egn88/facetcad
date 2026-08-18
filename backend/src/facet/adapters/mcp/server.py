@@ -89,6 +89,13 @@ say which body each face is on; pass `body=` to ask what one part sees. A
 feature resolves only within its own body and can never name a face another body
 made — that boundary is the thing to keep in view when working on an assembly.
 
+A part that appears more than once is a **copy**, not a second history:
+`duplicate_body` shows an existing body again at another placement. It builds
+once, edits once, and the build report's `parts` list says how many of each part
+the model calls for — the number to produce. Never rebuild the same part twice
+to place it twice; nothing then records that the two were meant to stay
+identical, and no one can read the count off the model.
+
 `guide` returns the full manual — selector syntax, a worked two-part enclosure,
 and the mistakes that cost a rebuild — for when this is all you have been given.
 """
@@ -243,6 +250,24 @@ def _detail_text(detail: object) -> str:
     return "\n".join(line for line in lines if line)
 
 
+def _many(body: Mapping[str, Any]) -> bool:
+    """Whether a body is called for more than once."""
+    quantity = body.get("quantity")
+    return isinstance(quantity, int) and quantity > 1
+
+
+def _parts_list(result: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Each distinct part with its quantity, when any part repeats.
+
+    Nothing for a model of one-offs: a list of `x1`s says only that the reader
+    has to check it, which is the kind of noise that gets a report skimmed.
+    """
+    parts = [row for row in _rows(result.get("parts")) if isinstance(row, Mapping)]
+    if not any(isinstance(row.get("quantity"), int) and row["quantity"] > 1 for row in parts):
+        return []
+    return [{"body": row.get("body"), "quantity": row.get("quantity")} for row in parts]
+
+
 def _error_summary(error: object) -> str | None:
     """One feature's build error, as text rather than as a nested object."""
     if not error:
@@ -316,7 +341,15 @@ def _build_report(result: Mapping[str, Any]) -> dict[str, Any]:
         features.append(row)
 
     bodies = [
-        {"id": body.get("id"), "ok": body.get("ok"), "faceCount": body.get("faceCount")}
+        {
+            "id": body.get("id"),
+            "ok": body.get("ok"),
+            "faceCount": body.get("faceCount"),
+            # Present only where they say something, so a model with no copies
+            # in it reads exactly as it did before they existed.
+            **({"of": body.get("of")} if body.get("of") else {}),
+            **({"quantity": body.get("quantity")} if _many(body) else {}),
+        }
         for body in _rows(result.get("bodies"))
         if isinstance(body, Mapping)
     ]
@@ -330,6 +363,10 @@ def _build_report(result: Mapping[str, Any]) -> dict[str, Any]:
 
     report: dict[str, Any] = {
         "ok": bool(result.get("ok")),
+        # Distinct parts and how many of each the model calls for — the piece
+        # count for a print run. Omitted where every part is a one-off, which is
+        # every model that has not used `duplicate_body`.
+        **({"parts": parts} if (parts := _parts_list(result)) else {}),
         "features": features,
         # Only the ones that actually stopped the build. A blend carrying
         # `on_failure: skip` also arrives with an error attached, and calling
@@ -424,6 +461,9 @@ def get_document(
     model does not currently build, which is exactly when you need to see it.
     Use `recompute` to find out what it does when built, and `topology` for the
     names the build produced.
+
+    A body carrying `of` is a copy: it has no features, and its geometry is the
+    body named there, placed at its own `placement`.
     """
     api = client()
     if fmt == "yaml":
@@ -997,6 +1037,11 @@ def add_body(
     display and export only and never reaches the modelled geometry, which is
     what lets you move a part around an assembly without perturbing a single
     face name.
+
+    For a part that appears more than once — four legs, six identical brackets —
+    use `duplicate_body` rather than adding a second body and rebuilding the
+    same history in it. A copy is built once, edited once, and counted, and the
+    count is what tells you how many to produce.
     """
     return _build_report(
         client().json(
@@ -1009,6 +1054,62 @@ def add_body(
             },
         )
     )
+
+
+@server.tool()
+def duplicate_body(
+    project: Project,
+    body: Annotated[str, Field(description="Id of the body to show again")],
+    as_id: Annotated[
+        str | None,
+        Field(description="Id for the copy; generated from the source's name when omitted"),
+    ] = None,
+    origin: Annotated[
+        list[float | str] | None,
+        Field(description="[x, y, z] for the copy; expressions allowed, e.g. ['pitch * 2', 0, 0]"),
+    ] = None,
+    rotation: Annotated[
+        list[float | str] | None, Field(description="[rx, ry, rz] in degrees")
+    ] = None,
+) -> dict[str, Any]:
+    """Show an existing body again at another placement, without copying its history.
+
+    Use this instead of rebuilding the same part a second time. The copy holds
+    no features of its own — it *is* the source's solid, appearing again where
+    you put it. Three consequences, each of which is the reason to prefer it:
+
+    - **Edit once.** Change a dimension on the source and every copy changes
+      with it. There is only one history, so the copies cannot drift apart.
+    - **Build once.** The solid is computed and tessellated a single time and
+      then transformed, so a model with twelve of a part costs one of them.
+    - **Counted.** The document knows the part is called for four times, and
+      every build report carries a `parts` list saying so — which is how many
+      you need to print. A copy-pasted history cannot answer that question,
+      because nothing in it records that the four were meant to be the same.
+
+    `origin` defaults to the source's own placement, which puts the copy on top
+    of it: visible in the tree, and asking to be moved. Move it later with
+    `move_body`, which treats a copy like any other body.
+
+    Copy the body that has the history, not another copy — the chain is refused
+    rather than flattened, so that "where does this geometry come from" always
+    has a one-word answer. Add features to the source; `add_feature` against a
+    copy is refused and says where they belong.
+    """
+    payload: dict[str, Any] = {}
+    if as_id is not None:
+        payload["id"] = as_id
+    if origin is not None:
+        payload["origin"] = origin
+    if rotation is not None:
+        payload["rotation"] = rotation
+    answer = client().json(
+        "POST", f"{_project(project)}/bodies/{body}/copies", json=payload
+    )
+    report = _build_report(answer)
+    if isinstance(answer, Mapping) and answer.get("id"):
+        report["id"] = answer["id"]
+    return report
 
 
 @server.tool()
@@ -1031,6 +1132,9 @@ def move_body(
     what makes it a free operation rather than a rebuild of the part.
 
     Both arguments replace what is there, so pass both to change both.
+
+    A copy made by `duplicate_body` is placed with this too — that is the whole
+    of what distinguishes one copy from another.
     """
     return _build_report(
         client().json(
@@ -1055,6 +1159,11 @@ def delete_body(
     Bodies are independent, so the others are unaffected — this is the one
     delete in the document that cannot break something elsewhere. What goes
     with it is every feature declared in it and every face those features named.
+
+    One exception: a body that other bodies copy is refused, naming them, since
+    deleting it would take their geometry with it. Delete the copies first.
+    Deleting a copy is always safe — it removes one placement and drops the
+    part's quantity by one, and the source is untouched.
     """
     return _build_report(client().json("DELETE", f"{_project(project)}/bodies/{body}"))
 
@@ -1134,6 +1243,27 @@ def _tags(index: Mapping[str, Any], notes: list[str], where: str = "") -> dict[s
     }
 
 
+def _copied_by(project: str, body: str) -> str | None:
+    """The body a named copy shows, or None when it is not a copy.
+
+    Read from the document, and only on the path where something was not found —
+    a second request to explain a failure is worth it; a second request on every
+    successful call is not.
+    """
+    try:
+        document = client().json("GET", _project(project) + "/document")
+    except Exception:
+        # This runs only to explain a failure. If it cannot, the caller still
+        # gets the plain "no such body" message — an explanation that throws
+        # would replace a clear error with an obscure one.
+        return None
+    for row in _rows(document.get("bodies")):
+        if isinstance(row, Mapping) and str(row.get("id")) == body:
+            source = row.get("of")
+            return str(source) if source else None
+    return None
+
+
 def _bodies_of(project: str) -> list[Mapping[str, Any]]:
     """Every body's named geometry, keyed by body id."""
     payload = client().json("GET", _project(project) + "/topologies")
@@ -1174,6 +1304,16 @@ def topology(
     if body is not None:
         named = next((b for b in bodies if str(b.get("id")) == body), None)
         if named is None:
+            copied = _copied_by(project, body)
+            if copied is not None:
+                # The faces exist; they are named by the history that made them.
+                # Sending the reader there beats reporting a body that is not
+                # missing as though it were a typo.
+                raise ToolError(
+                    f"body '{body}' is a copy of '{copied}' and names no faces of its "
+                    f"own. Ask for '{copied}' — a selector written there applies to "
+                    "every copy of it."
+                )
             raise ToolError(
                 f"no body '{body}' in project '{project}'. It has: "
                 + (", ".join(str(b.get("id")) for b in bodies) or "no bodies")

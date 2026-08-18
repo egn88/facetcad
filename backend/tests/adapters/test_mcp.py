@@ -321,6 +321,76 @@ def test_one_body_can_be_asked_for_by_name(tools: MCPServer[Any], api: FakeApi) 
         call(tools, "topology", project="assembly", body="ghost")
 
 
+def test_asking_a_copy_for_its_faces_points_at_the_body_that_names_them(
+    tools: MCPServer[Any], api: FakeApi
+) -> None:
+    """A copy is missing from the index on purpose, and that is not a typo.
+
+    Reporting it as an unknown body would send the reader to check a spelling
+    that is right. The faces exist; they are named by the history that made them.
+    """
+    api.on("GET", "/api/projects/assembly/topologies", json=two_bodies())
+    api.on(
+        "GET",
+        "/api/projects/assembly/document",
+        json={"bodies": [{"id": "plate"}, {"id": "plate_2", "of": "plate"}]},
+    )
+
+    with pytest.raises(ToolError, match="copy of 'plate'"):
+        call(tools, "topology", project="assembly", body="plate_2")
+
+
+def test_a_duplicated_body_reports_how_many_pieces_are_needed(
+    tools: MCPServer[Any], api: FakeApi
+) -> None:
+    """The count is the reason to prefer a copy, so every report carries it."""
+    api.on(
+        "POST",
+        "/api/projects/table/bodies/leg/copies",
+        json={
+            "id": "leg_2",
+            "ok": True,
+            "features": [],
+            "parameters": {},
+            "parts": [{"body": "leg", "quantity": 2}],
+            "bodies": [
+                {"id": "leg", "ok": True, "faceCount": 6, "of": None, "quantity": 2},
+                {"id": "leg_2", "ok": True, "faceCount": 6, "of": "leg", "quantity": 0},
+            ],
+        },
+    )
+
+    result = call(tools, "duplicate_body", project="table", body="leg", origin=[40, 0, 0])
+
+    assert result["id"] == "leg_2"
+    assert result["parts"] == [{"body": "leg", "quantity": 2}]
+    assert result["bodies"][0]["quantity"] == 2
+    assert result["bodies"][1]["of"] == "leg"
+
+
+def test_a_model_of_one_offs_is_not_cluttered_with_counts(
+    tools: MCPServer[Any], api: FakeApi
+) -> None:
+    """A list of x1s says only that the reader has to check it."""
+    api.on(
+        "POST",
+        "/api/projects/plain/recompute",
+        json={
+            "ok": True,
+            "features": [],
+            "parameters": {},
+            "parts": [{"body": "main", "quantity": 1}],
+            "bodies": [{"id": "main", "ok": True, "faceCount": 6, "of": None, "quantity": 1}],
+        },
+    )
+
+    result = call(tools, "recompute", project="plain")
+
+    assert "parts" not in result
+    assert "quantity" not in result["bodies"][0]
+    assert "of" not in result["bodies"][0]
+
+
 def test_which_body_a_match_came_from_survives_the_hop(
     tools: MCPServer[Any], api: FakeApi
 ) -> None:

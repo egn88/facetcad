@@ -52,8 +52,41 @@ class Document:
     def remove_body(self, identifier: str) -> Body:
         if len(self.bodies) == 1:
             raise DocumentError(reason="a document needs at least one body")
+        copies = self.copies_of(identifier)
+        if copies:
+            # Deleting the source silently would take its copies with it, which
+            # is a lot of model to lose to one click. Refused with the list, in
+            # the same spirit as a parameter something still reads.
+            names = ", ".join(repr(body.id) for body in copies)
+            raise DocumentError(
+                reason=(
+                    f"body {identifier!r} is copied by {names}. Delete the copies "
+                    "first, or promote one of them to a body of its own."
+                ),
+                path=f"bodies.{identifier}",
+            )
         index = next(i for i, b in enumerate(self.bodies) if b.id == identifier)
         return self.bodies.pop(index)
+
+    def copies_of(self, identifier: str) -> list[Body]:
+        """Bodies that show ``identifier``'s solid at their own placement."""
+        return [body for body in self.bodies if body.of == identifier]
+
+    def quantity_of(self, identifier: str) -> int:
+        """How many times a body appears in the model.
+
+        The number of pieces to produce, which is the question a printer asks
+        and the one a model that duplicates by copy-paste cannot answer. A copy
+        reports 0: it is counted by the body it copies, so the quantities over
+        the document sum to the piece count rather than double-counting it.
+        """
+        body = self.body(identifier)
+        return 0 if body.is_copy else 1 + len(self.copies_of(identifier))
+
+    @property
+    def sources(self) -> list[Body]:
+        """Bodies that build themselves — everything with a history."""
+        return [body for body in self.bodies if not body.is_copy]
 
     def body_of_feature(self, identifier: str) -> Body:
         for body in self.bodies:
@@ -71,7 +104,11 @@ class Document:
         """
         if not self.bodies:
             self.bodies.append(Body(id=DEFAULT_BODY))
-        return self.bodies[0]
+        # Never a copy: a copy has no history, so a feature landing there has
+        # nowhere to go. The first body that builds itself is what "the default"
+        # has always meant, and on a document with no copies it is `bodies[0]`
+        # exactly as before.
+        return next((b for b in self.bodies if not b.is_copy), self.bodies[0])
 
     # -- lookup ------------------------------------------------------------
 
@@ -114,6 +151,15 @@ class Document:
             if any(f.id == spec.id for f in existing.features):
                 raise DuplicateIdError(kind="feature", identifier=spec.id)
         target = self.body(body) if body else self.default_body
+        if target.is_copy:
+            raise DocumentError(
+                reason=(
+                    f"body {target.id!r} is a copy of {target.of!r} and has no history "
+                    f"of its own. Add {spec.id!r} to {target.of!r} instead and every "
+                    "copy of it gets the feature."
+                ),
+                path=f"bodies.{target.id}.features",
+            )
         target.add_feature(spec, at)
 
     def replace_feature(self, spec: FeatureSpec) -> None:
@@ -267,10 +313,12 @@ class Document:
 
         seen_bodies: set[str] = set()
         seen_features: set[str] = set()
+        known = {body.id for body in self.bodies}
         for body in self.bodies:
             if body.id in seen_bodies:
                 raise DuplicateIdError(kind="body", identifier=body.id)
             seen_bodies.add(body.id)
+            self._validate_copy(body, known)
             body.validate()
 
             for spec in body.features:
@@ -286,6 +334,37 @@ class Document:
                             referenced_by=spec.id,
                         )
                     sketch.loop(spec.profile.loop)
+
+    def _validate_copy(self, body: Body, known: set[str]) -> None:
+        """A copy must point at one real body, and only one hop away.
+
+        Chains are refused rather than followed. Following them is a page of
+        cycle detection to buy an expressiveness nobody asked for -- a copy of
+        a copy is the same solid at the same placement, so it is a copy of the
+        source, spelled the long way. Refusing keeps "where does this geometry
+        come from" a question with a one-word answer.
+        """
+        if body.of is None:
+            return
+        if body.of == body.id:
+            raise DocumentError(
+                reason=f"body {body.id!r} cannot be a copy of itself",
+                path=f"bodies.{body.id}.of",
+            )
+        if body.of not in known:
+            raise UnknownReferenceError(
+                kind="body", identifier=body.of, referenced_by=body.id
+            )
+        source = self.body(body.of)
+        if source.is_copy:
+            raise DocumentError(
+                reason=(
+                    f"body {body.id!r} copies {body.of!r}, which is itself a copy of "
+                    f"{source.of!r}. Copy {source.of!r} directly — a copy of a copy is "
+                    "the same solid, and one hop keeps the source unambiguous."
+                ),
+                path=f"bodies.{body.id}.of",
+            )
 
     # -- dependency analysis ----------------------------------------------
 

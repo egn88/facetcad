@@ -14,6 +14,7 @@ import { Injectable, computed, inject, signal } from '@angular/core';
 
 import { CadApiService } from './cad-api.service';
 import type {
+  BodyGroup,
   BodyMesh,
   BuildResult,
   CadDocument,
@@ -124,16 +125,52 @@ export class ProjectStore {
    * A single-body document is still written with a flat `features` list, so
    * both shapes are read here rather than forcing the server to pick one.
    */
-  readonly featuresByBody = computed<{ body: string; features: FeatureRow[] }[]>(() => {
-    const document = this.document();
-    if (!document) return [];
-    if (document.bodies?.length) {
-      return document.bodies.map((body) => ({ body: body.id, features: body.features }));
-    }
-    return [{ body: 'main', features: document.features ?? [] }];
-  });
+  readonly featuresByBody = computed<{ body: string; features: FeatureRow[]; of: string | null }[]>(
+    () => {
+      const document = this.document();
+      if (!document) return [];
+      if (document.bodies?.length) {
+        return document.bodies.map((body) => ({
+          body: body.id,
+          // A copy writes no `features` key at all — it can never have one.
+          features: body.features ?? [],
+          of: body.of ?? null,
+        }));
+      }
+      return [{ body: 'main', features: document.features ?? [], of: null }];
+    },
+  );
 
   readonly bodyIds = computed(() => this.featuresByBody().map((group) => group.body));
+
+  /**
+   * Bodies a feature can actually be added to.
+   *
+   * A copy has no history, so offering it as a target would produce a refusal
+   * the user could have been spared. This is what the body pickers offer.
+   */
+  readonly editableBodyIds = computed(() =>
+    this.featuresByBody()
+      .filter((group) => group.of === null)
+      .map((group) => group.body),
+  );
+
+  /**
+   * How many pieces of each body the model calls for, by body id.
+   *
+   * Read off the build rather than counted here: the server owns the rule that
+   * a copy is counted by its source, and two places implementing it is one
+   * place too many.
+   */
+  readonly bodyQuantities = computed<Map<string, number>>(
+    () => new Map((this.build()?.bodies ?? []).map((body) => [body.id, body.quantity])),
+  );
+
+  /** Each distinct part with how many to produce — the print run. */
+  readonly parts = computed(() => this.build()?.parts ?? []);
+
+  /** Whether anything in this model repeats, which is when counts are worth showing. */
+  readonly hasCopies = computed(() => this.parts().some((part) => part.quantity > 1));
 
   /**
    * The body being worked on, or null for "all bodies".
@@ -162,11 +199,14 @@ export class ProjectStore {
     this.featureGroups().flatMap((group) => group.features),
   );
 
-  /** Features grouped under the body that owns them. */
-  readonly featureGroups = computed<{ body: string; features: FeatureView[] }[]>(() => {
+  /** Features grouped under the body that owns them, with its piece count. */
+  readonly featureGroups = computed<BodyGroup[]>(() => {
     const outcomes = new Map((this.build()?.features ?? []).map((o) => [o.id, o]));
+    const quantities = this.bodyQuantities();
     return this.featuresByBody().map((group) => ({
       body: group.body,
+      of: group.of,
+      quantity: quantities.get(group.body) ?? 1,
       features: group.features.map((feature) => {
         const outcome = outcomes.get(feature.id);
         const status = feature.suppressed ? 'suppressed' : (outcome?.status ?? 'skipped');
@@ -356,7 +396,11 @@ export class ProjectStore {
   readonly exportTargets = computed<ExportTarget[]>(() => {
     const id = this.projectId();
     if (!id) return [];
-    const bodies = this.bodyIds();
+    // Distinct parts, not placements: exporting a copy would hand back the same
+    // solid under a second name, and the number to print is the quantity rather
+    // than a row per piece.
+    const bodies = this.editableBodyIds();
+    const quantities = this.bodyQuantities();
     const formats = (body?: string) => ({
       stl: this.api.exportUrl(id, 'stl', body),
       obj: this.api.exportUrl(id, 'obj', body),
@@ -366,21 +410,29 @@ export class ProjectStore {
       id: '',
       label: 'Whole model',
       note:
-        bodies.length > 1
-          ? 'Every body at its placement — the assembly, not a print bed'
+        bodies.length > 1 || this.hasCopies()
+          ? 'Every body at its placement, copies included — the assembly, not a print bed'
           : 'The complete part',
       ...formats(),
     };
-    // One body is the whole model; offering both would be the same file twice.
-    if (bodies.length < 2) return [whole];
+    // One part placed once is the whole model; offering both would be the same
+    // file twice. One part placed several times is not — the whole model is the
+    // assembly and the part is what goes on the bed.
+    if (bodies.length < 2 && !this.hasCopies()) return [whole];
     return [
       whole,
-      ...bodies.map((body) => ({
-        id: body,
-        label: body,
-        note: 'This body alone, moved to the origin for the print bed',
-        ...formats(body),
-      })),
+      ...bodies.map((body) => {
+        const quantity = quantities.get(body) ?? 1;
+        return {
+          id: body,
+          label: quantity > 1 ? `${body} x${quantity}` : body,
+          note:
+            quantity > 1
+              ? `One of this part — print ${quantity} of it`
+              : 'This body alone, moved to the origin for the print bed',
+          ...formats(body),
+        };
+      }),
     ];
   });
 
@@ -525,6 +577,17 @@ export class ProjectStore {
 
   addBody(bodyId: string): Promise<boolean> {
     return this.mutate((id) => this.api.addBody(id, bodyId));
+  }
+
+  /**
+   * Show a body again at another placement.
+   *
+   * The copy lands on top of its source, which is deliberate: it is visible in
+   * the tree and obviously asking to be moved, where a copy quietly offset by
+   * some guessed amount would be a placement the user did not choose.
+   */
+  duplicateBody(bodyId: string): Promise<boolean> {
+    return this.mutate((id) => this.api.duplicateBody(id, bodyId));
   }
 
   async deleteBody(bodyId: string): Promise<boolean> {

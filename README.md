@@ -170,6 +170,48 @@ parameters and other datums, never from picked topology, and extrusion direction
 an explicit `+normal` / `-normal` sign. This designs out the whole class of flip and mirror
 failures rather than patching it.
 
+### A part that repeats is one part, not several
+
+A model with four identical legs holds one leg and three **copies** of it:
+
+```yaml
+bodies:
+  - id: leg
+    features:
+      - {id: shaft, type: pad, profile: leg.outer, length: leg_h}
+  - {id: leg_2, of: leg, placement: {origin: [span_w, 0, 0]}}
+  - {id: leg_3, of: leg, placement: {origin: [0, span_l, 0]}}
+  - {id: leg_4, of: leg, placement: {origin: [span_w, span_l, 0]}}
+```
+
+`of` names the body a copy shows. A copy holds no history: it *is* that solid, at its own
+placement. Placement was already kept out of the modelled geometry — a body is built in
+its own coordinates and transformed for display and export — so this costs nothing new.
+The copy reuses the source's content key, which means it reuses the source's cached mesh
+too: four legs are one build, one tessellation and four transforms.
+
+What that buys over pasting the history three more times:
+
+| | copies | pasted histories |
+|---|---|---|
+| change the leg | edit once, all four follow | four edits, or they silently drift |
+| rebuild cost | one build, one tessellation | four of each |
+| **how many to print** | `parts` says `leg` x4 | count them by eye |
+
+The last row is the one that matters on a print bed. Four pasted histories are four
+unrelated bodies as far as the document is concerned; nothing in it records that they were
+meant to be identical, so nothing can tell you that you need four of the part. A copy is a
+declaration, and the piece count falls out of it.
+
+The rules are refusals with a message rather than surprises: a copy holds no features
+(`add_feature` names the source instead), a copy of a copy is refused so provenance stays
+one hop, and deleting a body other bodies copy is refused and names them. A copy also
+names no faces of its own — `topology` and `resolve_selector` answer for the source, so a
+selector written once applies to every copy.
+
+`duplicate_body` over MCP, `POST /api/projects/{id}/bodies/{bid}/copies` over HTTP, or the
+⧉ button on a body in the tree.
+
 ## Quick start
 
 ```bash
@@ -243,6 +285,10 @@ GET    /api/projects/{id}/export?fmt=       POST   /api/projects/{id}/import
 GET    /api/projects/{id}/export/cut?selector=      .../export/views?views=
 GET    /api/projects/{id}/export/flat               .../export/jointed?thickness=
 GET    /api/projects/{id}/export/enclosure?thickness=
+```
+
+```http
+POST   /api/projects/{id}/bodies/{bid}/copies   # the same solid, placed again
 ```
 
 Bodies, sketches and datums are edited through endpoints of the same shape; `/openapi.json`
@@ -321,7 +367,7 @@ cd backend && .venv/bin/pip install -e ".[mcp]"
 FACET_URL=http://localhost:8080/api .venv/bin/python -m facet.mcp
 ```
 
-Both drive the same 37 tools. The extra is optional and the API boots without it — it
+Both drive the same 38 tools. The extra is optional and the API boots without it — it
 simply serves no MCP endpoint, which is what `FACET_INSTALL=.[occt]` gets you.
 
 ### Reading the docs instead
@@ -364,12 +410,12 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) and [DESIGN.md](DESIGN.md).
 ## Tests
 
 ```bash
-cd backend && .venv/bin/python -m pytest        # 1010 tests, ~2 min with OCCT installed
+cd backend && .venv/bin/python -m pytest        # 1099 tests, ~85 s with OCCT installed
 cd frontend && npm test                        # 25 tests, chain naming stability
 ```
 
-Without the OCCT extra, 248 of those drop out and the remaining 596 — naming, selectors,
-recompute, the whole domain — run on the analytic kernel in about eleven seconds.
+Without the OCCT extra, 303 of those drop out and the remaining 796 — naming, selectors,
+recompute, the whole domain — run on the analytic kernel in about fifteen seconds.
 
 The conformance suite runs twice — once per kernel — so OCCT and the analytic kernel are
 proven interchangeable rather than merely intended to be.

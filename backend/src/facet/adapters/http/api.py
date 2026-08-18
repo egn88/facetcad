@@ -124,6 +124,24 @@ class BodyPayload(BaseModel):
     rotation: list[Any] = Field(default_factory=lambda: [0, 0, 0])
 
 
+class CopyPayload(BaseModel):
+    """Where a copy of a body goes, and optionally what to call it."""
+
+    id: str | None = Field(
+        default=None,
+        description="Id for the copy; generated from the source's name when omitted",
+    )
+    origin: list[Any] | None = Field(
+        default=None,
+        description=(
+            "[x, y, z]; expressions allowed. Defaults to the source's own "
+            "placement, which puts the copy exactly on top of it — visible "
+            "in the tree, and asking to be moved."
+        ),
+    )
+    rotation: list[Any] | None = Field(default=None, description="[rx, ry, rz] in degrees")
+
+
 class FaceTagPayload(BaseModel):
     tag: str = Field(description="A face tag, such as 'pad_1/cap+'")
     point: list[float] | None = Field(
@@ -266,14 +284,18 @@ def list_projects() -> dict[str, object]:
 
 @router.post("/projects", status_code=201, summary="Create a project")
 def create_project(payload: CreateProject) -> dict[str, object]:
-    document = (
-        Document.from_dict(payload.document)
-        if payload.document is not None
-        else Document(name=payload.name or payload.id)
-    )
-    if payload.name:
-        document.name = payload.name
     try:
+        # Inside the try: reading the document can refuse it — a body that is
+        # both a copy and a history, a `features` that is not a list — and
+        # outside, that refusal escaped as an unhandled 500 rather than as the
+        # message it carries.
+        document = (
+            Document.from_dict(payload.document)
+            if payload.document is not None
+            else Document(name=payload.name or payload.id)
+        )
+        if payload.name:
+            document.name = payload.name
         return service().create_project(payload.id, document).to_dict()
     except Exception as error:
         raise _fail(error) from error
@@ -637,6 +659,36 @@ def add_body(project_id: str, payload: BodyPayload) -> dict[str, object]:
         return service().add_body(project_id, body).to_dict()
     except Exception as error:
         raise _fail(error) from error
+
+
+@router.post(
+    "/projects/{project_id}/bodies/{body_id}/copies",
+    summary="Show a body again at another placement",
+)
+def duplicate_body(
+    project_id: str, body_id: str, payload: CopyPayload
+) -> dict[str, object]:
+    """Add a copy of a body: the same solid, elsewhere, built only once.
+
+    The copy holds no features. Editing the source edits every copy, and the
+    document records how many of the part it calls for — the piece count a
+    copy-pasted history cannot give you.
+    """
+    try:
+        placement = (
+            Placement(
+                origin=tuple(payload.origin or [0, 0, 0]),
+                rotation=tuple(payload.rotation or [0, 0, 0]),
+            )
+            if payload.origin is not None or payload.rotation is not None
+            else None
+        )
+        identifier, result = service().duplicate_body(
+            project_id, body_id, payload.id, placement
+        )
+    except Exception as error:
+        raise _fail(error) from error
+    return {"id": identifier, **result.to_dict()}
 
 
 @router.patch("/projects/{project_id}/bodies/{body_id}", summary="Move a body")

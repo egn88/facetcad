@@ -13,6 +13,13 @@ Placement is deliberately **not** applied to the modelled geometry. A body is
 built in its own coordinates and placed for display and export, so moving a
 body cannot perturb a face fingerprint or a split ordinal. When joints arrive
 they drive these values rather than introducing a new concept.
+
+That separation is also what makes a **copy** cheap. A body whose ``of`` names
+another holds no history of its own: it is the same solid, appearing again at
+its own placement. Four legs are then one build, one tessellation and four
+transforms, and editing the leg edits all four because there is only one leg.
+The alternative -- pasting the history three more times -- is four things to
+keep in step by hand, and a count nobody can read off the model.
 """
 
 from __future__ import annotations
@@ -70,10 +77,33 @@ class Body:
     features: list[FeatureSpec] = field(default_factory=list)
     placement: Placement = field(default_factory=Placement)
     doc: str = ""
+    #: The body this one copies, or None for a body that builds itself. A copy
+    #: has no history: it shows the source's solid at its own placement.
+    of: str | None = None
 
     def __post_init__(self) -> None:
         if not self.id.isidentifier():
             raise DocumentError(reason=f"body id {self.id!r} must be an identifier")
+        if self.of is not None and not self.of.isidentifier():
+            raise DocumentError(reason=f"body id {self.of!r} must be an identifier")
+        if self.of is not None and self.features:
+            # Allowing both would make "which of these two shapes is it?" a
+            # question with no answer. A copy that needs features of its own is
+            # a body of its own, and saying so here costs less than debugging a
+            # model where the two disagree.
+            raise DocumentError(
+                reason=(
+                    f"body {self.id!r} is a copy of {self.of!r}, so it cannot hold "
+                    f"features of its own. Add them to {self.of!r} and every copy "
+                    "gets them, or make this a body in its own right."
+                ),
+                path=f"bodies.{self.id}.features",
+            )
+
+    @property
+    def is_copy(self) -> bool:
+        """Whether this body's geometry comes from another body."""
+        return self.of is not None
 
     # -- features ----------------------------------------------------------
 
@@ -129,10 +159,13 @@ class Body:
     # -- serialisation -----------------------------------------------------
 
     def to_dict(self) -> dict[str, object]:
-        data: dict[str, object] = {
-            "id": self.id,
-            "features": [spec.to_dict() for spec in self.features],
-        }
+        data: dict[str, object] = {"id": self.id}
+        if self.of is not None:
+            # No `features: []` on a copy: it can never have any, and an empty
+            # list invites the reader to wonder what belongs in it.
+            data["of"] = self.of
+        else:
+            data["features"] = [spec.to_dict() for spec in self.features]
         if not self.placement.is_default:
             data["placement"] = self.placement.to_dict()
         if self.doc:
@@ -161,6 +194,7 @@ class Body:
                 else Placement()
             ),
             doc=str(data.get("doc", "")),
+            of=str(raw_of) if (raw_of := data.get("of")) is not None else None,
         )
 
 

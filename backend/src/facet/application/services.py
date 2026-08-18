@@ -369,6 +369,21 @@ class ProjectService:
             entry for entry in result.topologies() if body is None or entry[0] == body
         )
         if body is not None and not found:
+            copied = next(
+                (b.of for b in result.bodies if b.id == body and b.is_copy), None
+            )
+            if copied is not None:
+                # Not a typo and not an empty body: the faces exist, they are
+                # just named by the history that made them. Send the reader
+                # there rather than reporting nothing.
+                raise DocumentError(
+                    reason=(
+                        f"body {body!r} is a copy of {copied!r} and names no faces of "
+                        f"its own. Ask {copied!r} — a selector written there applies to "
+                        "every copy."
+                    ),
+                    path="bodies",
+                )
             names = ", ".join(entry.id for entry in result.bodies) or "no bodies"
             raise DocumentError(
                 reason=f"no body named {body!r}; this document has {names}", path="bodies"
@@ -410,8 +425,13 @@ class ProjectService:
 
         ``body`` names one to export on its own — which is what printing a
         multi-part model needs, since the parts go on the bed separately.
-        Without it every body is included, because a document that builds two
-        parts should not quietly export one.
+        Without it every body is included, copies among them, because a document
+        that builds two parts should not quietly export one and an assembly of
+        four legs is four legs.
+
+        Naming a copy exports that copy alone, at its own placement. Naming the
+        source exports one of it — which is the file to print, with the parts
+        list saying how many times to press go.
 
         Placement *is* applied here, unlike in :meth:`body_meshes`. There it
         travels as a matrix so the viewport can move a body without a rebuild;
@@ -562,6 +582,8 @@ class ProjectService:
                 meshes.append(
                     {
                         "id": body.id,
+                        "of": body.of,
+                        "quantity": body.quantity,
                         "placement": list(body.placement.to_matrix()),
                         "positions": [], "normals": [], "indices": [],
                         "faceRanges": [], "edges": [],
@@ -574,6 +596,10 @@ class ProjectService:
             meshes.append(
                 {
                     "id": body.id,
+                    # A copy carries the same tags as its source, so hovering a
+                    # face on any of them highlights the one named face.
+                    "of": body.of,
+                    "quantity": body.quantity,
                     "placement": list(body.placement.to_matrix()),
                     **_coordinates(tessellation, packed),
                     "faceRanges": [
@@ -598,9 +624,13 @@ class ProjectService:
         return self._topology_payload(self.recompute(project_id))
 
     def _topology_payload(self, result: RecomputeResult) -> dict[str, object]:
+        # Through `topologies()` rather than over `bodies` directly, so copies
+        # are left out here too. A copy's solid is the source's, so iterating
+        # the bodies reported every tag once per copy — which reads as "this
+        # face exists four times" when it exists once and is shown four times.
         return {
             "bodies": [
-                {"id": body.id, **body.topology.to_dict()} for body in result.bodies
+                {"id": name, **index.to_dict()} for name, index in result.topologies()
             ]
         }
 
@@ -610,6 +640,46 @@ class ProjectService:
         document = self._repository.load(project_id)
         document.add_body(body)
         return self._persist_and_rebuild(project_id, document)
+
+    def duplicate_body(
+        self,
+        project_id: str,
+        source: str,
+        identifier: str | None = None,
+        placement: Placement | None = None,
+    ) -> tuple[str, RecomputeResult]:
+        """Show an existing body again, elsewhere, without copying its history.
+
+        The copy has no features: it *is* the source's solid, at its own
+        placement. Editing the source therefore edits every copy, and the model
+        knows how many of the part it calls for — which is the number you need
+        when the parts go to a printer, and the number a copy-pasted history
+        cannot give you because nothing in it records that the three histories
+        were meant to stay identical.
+
+        Returns the id given to the copy, since it is generated when the caller
+        does not name one.
+        """
+        document = self._repository.load(project_id)
+        original = document.body(source)
+        if original.is_copy:
+            # Refused rather than quietly re-pointed at the source: a caller who
+            # asked to copy a copy is reasoning about a chain, and silently
+            # flattening it would leave them with a model shaped differently
+            # from the one they think they built.
+            raise DocumentError(
+                reason=(
+                    f"body {source!r} is itself a copy of {original.of!r}. Copy "
+                    f"{original.of!r} directly — every copy points at the body that "
+                    "has the history."
+                ),
+                path=f"bodies.{source}",
+            )
+        chosen = identifier or _next_copy_id(document, source)
+        document.add_body(
+            Body(id=chosen, of=source, placement=placement or original.placement)
+        )
+        return chosen, self._persist_and_rebuild(project_id, document)
 
     def update_body(
         self, project_id: str, identifier: str, placement: Placement
@@ -644,6 +714,12 @@ class ProjectService:
             )
         result = self.recompute_for_export(project_id)
         wanted = self._bodies_for_mesh(result, body)
+        # Copies are the same solid, so they do not make this ambiguous — a
+        # model of one leg placed four times is still one part to write, and
+        # having it refuse to export until you name the leg would be a rule
+        # about our bookkeeping rather than about STEP.
+        if body is None:
+            wanted = [entry for entry in wanted if not entry.is_copy]
         if not wanted:
             raise CapabilityError(
                 capability=Capability.BREP_EXPORT,
@@ -651,10 +727,10 @@ class ProjectService:
                 available=tuple(sorted(self._kernel.capabilities)),
             )
         if body is None and len(wanted) > 1:
-            names = ", ".join(entry.id for entry in result.bodies if entry.solid)
+            names = ", ".join(entry.id for entry in wanted)
             raise DocumentError(
                 reason=(
-                    f"this document builds {len(wanted)} bodies ({names}); name one "
+                    f"this document builds {len(wanted)} parts ({names}); name one "
                     "with ?body= — a STEP file here holds a single solid"
                 ),
                 path="export",
@@ -921,11 +997,18 @@ class ProjectService:
         return propose_datum_for_face(self._repository.load(project_id), tag, point)
 
     def _bodies_for(self, result: RecomputeResult, body: str | None) -> list[NamedSolid]:
-        """Built bodies, optionally narrowed to one by id."""
+        """Built bodies, optionally narrowed to one by id.
+
+        Copies are left out unless one is named. These callers — flattening,
+        setup views, cut paths — describe *a part*, and four identical DXFs of
+        the same leg is four times the work to say one thing. The quantity is
+        what the reader needs there, and it is on the parts list.
+        """
         found = [
             b.solid
             for b in result.bodies
-            if b.solid is not None and (body is None or b.id == body)
+            if b.solid is not None
+            and (b.id == body if body is not None else not b.is_copy)
         ]
         if body is not None and not found:
             raise DocumentError(reason=f"no body named {body!r} built", path="bodies")
@@ -1284,6 +1367,19 @@ def _packed(values: array[float] | array[int]) -> str:
     if not _LITTLE_ENDIAN:  # pragma: no cover - no big-endian machine to run on
         values.byteswap()
     return base64.b64encode(values.tobytes()).decode("ascii")
+
+
+def _next_copy_id(document: Document, source: str) -> str:
+    """`leg_2`, then `leg_3` — the next free one, counting the source as the first.
+
+    Numbered from the piece count rather than from the copies, so the ids read
+    the way the parts do: `leg`, `leg_2`, `leg_3` is three legs.
+    """
+    taken = {body.id for body in document.bodies}
+    index = document.quantity_of(source) + 1
+    while f"{source}_{index}" in taken:
+        index += 1
+    return f"{source}_{index}"
 
 
 def _placed_mesh(mesh: Tessellation, placement: Frame) -> Tessellation:

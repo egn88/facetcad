@@ -116,10 +116,10 @@ exactly, in pure Python. It exists for three reasons:
 1. **It proves the port is real.** A port with one implementation is a guess. Two force
    the abstraction to be honest, and any leak of OCCT concepts into `application` shows up
    immediately as a compile-time hole in the fake.
-2. **Test speed.** With OCCT absent entirely, 692 of the 1010 backend tests still run — the
+2. **Test speed.** With OCCT absent entirely, 796 of the 1099 backend tests still run — the
    naming, selector, recompute and snapshot suites, which are the ones that fail first when
-   the tag algebra is wrong — and they finish in about eighteen seconds against the two
-   minutes the full suite takes. The parameter sweeps are among the 318 that drop
+   the tag algebra is wrong — and they finish in about fifteen seconds against the eighty-five
+   the full suite takes. The parameter sweeps are among the 303 that drop
    out, deliberately: a stability proof has to run on the kernel that ships.
 3. **Bisecting failures.** When a model misbehaves, running it against both kernels
    answers "is this our naming layer or the kernel?" in one command.
@@ -162,6 +162,44 @@ Two consequences worth stating explicitly:
 as a transform. It is deliberately *not* baked into the modelled shape: canonical
 ordinals and fingerprints are computed in the owning feature's local frame, and moving
 a body must not be able to reach them.
+
+### Copies fall out of that separation
+
+A body whose `of` names another is a **copy**: no history of its own, the source's solid
+under its own id and placement. The engine builds the sources first, then emits each copy
+as a `BodyResult` carrying the source's `solid` and `key`:
+
+```python
+BodyResult(id="leg_2", solid=source.solid, key=source.key, of="leg", placement=frame)
+```
+
+Two things make this nearly free rather than merely convenient, and both are consequences
+of decisions already made for other reasons:
+
+- **The cache key is content-addressed, not body-addressed.** Only the cache *slot* is
+  namespaced by body; `_cache_key` hashes the spec, the upstream key and the parameters.
+  A copy sharing the source's key therefore shares its cached mesh — `_tessellate` keys on
+  `body.key` — so a document with twelve of a part tessellates one.
+- **Placement was never in the geometry.** A copy differs from its source by a transform
+  and nothing else, so there is no fingerprint or ordinal it could perturb.
+
+The dividing line downstream is between surfaces that describe *the model* and surfaces
+that describe *a part*. Copies are in the first and out of the second:
+
+| surface | copies |
+|---|---|
+| viewport meshes, `/state`, `/bodies`, whole-model STL/OBJ | included, each at its placement |
+| `topologies()`, selector resolution, flatten, views, cut paths, STEP | excluded |
+
+Excluding them from `topologies()` is the load-bearing one. A copy introduces no name — it
+shows the source's faces elsewhere — so listing it would report every tag once per copy and
+turn the cross-body diagnostic ("that tag exists, but in body X") into noise. Selectors are
+written against a history, and a copy has none. Asking `topology?body=leg_2` is answered
+with a redirect to `leg` rather than an empty index, since the faces do exist.
+
+`RecomputeResult.parts` is the piece count — each body that builds itself, with how many
+times it appears. A copy reports `quantity == 0` so the quantities sum to the piece count
+rather than doubling it.
 
 ## Feature handler registry (OCP in practice)
 

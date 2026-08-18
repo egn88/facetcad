@@ -68,6 +68,8 @@ function decodeBody(body: PackedBodyMesh): BodyMesh {
   }
   return {
     id: body.id,
+    of: body.of ?? null,
+    quantity: body.quantity ?? 1,
     placement: body.placement,
     positions: floats(body.positions),
     normals: floats(body.normals),
@@ -283,6 +285,25 @@ export class CadApiService {
         origin,
         rotation,
       }),
+    );
+  }
+
+  /**
+   * Show a body again at another placement, without copying its history.
+   *
+   * The copy is the same solid: built once, edited once, and counted, so the
+   * model can say how many of the part to produce.
+   */
+  duplicateBody(
+    id: string,
+    bodyId: string,
+    placement?: { origin: (number | string)[]; rotation: (number | string)[] },
+  ): Promise<BuildResult & { id: string }> {
+    return firstValueFrom(
+      this.http.post<BuildResult & { id: string }>(
+        `${BASE}/projects/${id}/bodies/${bodyId}/copies`,
+        placement ?? {},
+      ),
     );
   }
 
