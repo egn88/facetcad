@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import hashlib
+import pickle
 import sys
 from array import array
 from collections.abc import Mapping, Sequence
@@ -52,10 +54,21 @@ from .ports.geometry import (
 from .ports.repository import DocumentRepository, ProjectSummary
 from .ports.snapshots import SnapshotStore
 from .ports.warming import Warmer
-from .recompute import Detail, RecomputeEngine, RecomputeResult
+from .recompute import BodyResult, Detail, RecomputeEngine, RecomputeResult
 
 #: How finely a free-form curve is approximated when flattened for cutting (mm).
 DRAWING_TOLERANCE = 0.01
+
+#: Bumped when the *shape* of a stored mesh changes — a field added to
+#: ``Tessellation``, a different winding, refs spelled another way — so entries
+#: written by an older build are ignored rather than trusted. It goes into the
+#: key, so a bump orphans every stored mesh and the store's own eviction
+#: reclaims them.
+#:
+#: Separate from ``SNAPSHOT_FORMAT``: a mesh and a solid can change shape
+#: independently, and tying them together would throw away B-reps that are still
+#: perfectly good every time the payload gains a field.
+MESH_FORMAT = 1
 
 #: How near a parameter must resolve to a located offset to be named as its
 #: source. The offsets themselves are rounded to 4dp before anyone compares
@@ -114,12 +127,14 @@ class ProjectService:
         # allowed to be load-bearing.
         self._warmer = warmer
         self._engines: dict[str, RecomputeEngine] = {}
-        # Triangles, keyed by the solid they came from. A mesh is a pure function
-        # of a solid and a tolerance, and a solid that has not been rebuilt keeps
-        # the same handle -- so this is the same content-hash reasoning the
-        # engine uses, one layer up. Worth it because tessellation was 74% of a
-        # warm /state response and 86% with every thread modelled: the rebuild
-        # was cached and the mesh was not.
+        # Triangles, keyed by the state of the body they were cut from. A mesh
+        # is a pure function of a solid, a detail level and a tolerance, so this
+        # is the same content-hash reasoning the engine uses, one layer up.
+        # Worth it because tessellation was 74% of a warm /state response and
+        # 86% with every thread modelled: the rebuild was cached and the mesh
+        # was not. Keyed by kernel *handle* it still was not, since a restore
+        # issues a new one every time -- which is how a cache with a 100% miss
+        # rate went unnoticed.
         self._meshes: dict[str, Tessellation] = {}
 
     def invalidate_caches(self) -> None:
@@ -135,12 +150,14 @@ class ProjectService:
         the one thing that makes the recovery cheap instead of another full
         rebuild.
 
-        The mesh cache is keyed by handle and so does go: a replacement worker
-        numbers its solids from the start again, and a mesh under a reused id
-        would be the wrong shape rather than a slow one.
+        The mesh cache stays for the same reason. It used to be keyed by handle
+        and had to go, because a replacement worker numbers its solids from the
+        start again and a mesh under a reused id would be the wrong shape rather
+        than a slow one. Keyed by content it cannot be confused that way: the
+        triangles belong to the geometry, and the geometry outlives the process
+        that happened to be holding it.
         """
         self._engines.clear()
-        self._meshes.clear()
 
     # -- kernel introspection ---------------------------------------------
 
@@ -330,16 +347,16 @@ class ProjectService:
             return Tessellation(), result
 
         merged = Tessellation()
-        for placement, solid in wanted:
-            piece = self._tessellate(solid)
-            merged = _joined(merged, _placed_mesh(piece, placement))
+        for entry in wanted:
+            piece = self._tessellate(entry, detail)
+            merged = _joined(merged, _placed_mesh(piece, entry.placement))
         return merged, result
 
     def _bodies_for_mesh(
         self, result: RecomputeResult, body: str | None
-    ) -> list[tuple[Frame, NamedSolid]]:
+    ) -> list[BodyResult]:
         found = [
-            (entry.placement, entry.solid)
+            entry
             for entry in result.bodies
             if entry.solid is not None and (body is None or entry.id == body)
         ]
@@ -364,28 +381,102 @@ class ProjectService:
         result = self.recompute(project_id)
         return self._mesh_payload(result), result
 
-    #: How many meshes to keep. A handful per body covers alternating between
-    #: detail levels and a couple of edits; beyond that the oldest go.
-    _MESH_CACHE_LIMIT = 24
+    #: How many meshes to keep. One per body per detail level, so a document of
+    #: any size has to fit several times over: fourteen bodies at two levels is
+    #: one project, and a session moves between projects. At a typical 40kB of
+    #: triangles per body this is a few megabytes.
+    _MESH_CACHE_LIMIT = 128
 
-    def _tessellate(self, solid: NamedSolid) -> Tessellation:
-        """This solid's triangles, computed at most once.
+    def _tessellate(self, body: BodyResult, detail: str = Detail.DRAFT) -> Tessellation:
+        """This body's triangles, computed at most once.
 
-        Keyed on the handle rather than on the document, because that is exactly
-        what changes when the geometry does: a cached feature keeps its handle,
-        a rebuilt one gets a new id.
+        Keyed on the *content* of the solid — the key of the deepest feature that
+        built — rather than on the kernel handle it currently sits under. The
+        handle looks like the right key and is not: a restored solid is issued a
+        fresh id by the worker every single time, so a handle-keyed mesh could
+        never be hit twice across a restore and every request re-tessellated a
+        shape it had already tessellated. Content is what actually determines
+        the triangles, and the key already folds in the kernel name, so two
+        kernels cannot answer for each other.
+
+        Detail and tolerance belong in the key for the same reason they belong
+        in the engine's: they change the triangles.
         """
-        cached = self._meshes.get(solid.handle.id)
+        solid = body.solid
+        assert solid is not None
+        if body.key is None:
+            # A body with geometry but no key should not be reachable — a solid
+            # exists only because a feature built. Tessellating uncached is the
+            # honest response to being wrong about that.
+            return self._kernel.tessellate(solid.handle, self._tolerance)
+
+        key = f"{MESH_FORMAT}/{detail}/{self._tolerance:g}/{body.key}"
+        cached = self._meshes.get(key)
         if cached is not None:
             return cached
+
+        stored = self._stored_mesh(key)
+        if stored is not None:
+            self._remember_mesh(key, stored)
+            return stored
+
         mesh = self._kernel.tessellate(solid.handle, self._tolerance)
-        if len(self._meshes) >= self._MESH_CACHE_LIMIT:
-            del self._meshes[next(iter(self._meshes))]
-        self._meshes[solid.handle.id] = mesh
+        self._remember_mesh(key, mesh)
+        self._store_mesh(key, mesh)
         return mesh
 
+    def _remember_mesh(self, key: str, mesh: Tessellation) -> None:
+        if len(self._meshes) >= self._MESH_CACHE_LIMIT:
+            del self._meshes[next(iter(self._meshes))]
+        self._meshes[key] = mesh
+
+    # -- triangles that outlive the process --------------------------------
+    #
+    # The same content-hash reasoning as the engine's snapshots, one layer up
+    # and in the same store. Worth its own entry rather than being folded into
+    # the snapshot: meshing a restored body was 91ms of a cold open here, and on
+    # a kernel running out of process the triangles also make the trip back down
+    # the pipe. A body whose mesh is on disk needs neither.
+
+    def _mesh_store_key(self, key: str) -> str:
+        blob = f"mesh/{self._kernel.name}/{key}"
+        return hashlib.sha256(blob.encode()).hexdigest()
+
+    def _stored_mesh(self, key: str) -> Tessellation | None:
+        """A stored mesh for this exact geometry, or None for any reason at all.
+
+        Every failure is a miss, exactly as it is for a snapshot: a missing
+        file, a truncated one, a pickle from a layout that has since changed.
+        Tessellating is always correct, so nothing here is worth raising over.
+        """
+        if self._snapshots is None:
+            return None
+        blob = self._snapshots.load(self._mesh_store_key(key))
+        if blob is None:
+            return None
+        try:
+            mesh = pickle.loads(blob)
+        except Exception:
+            return None
+        return mesh if isinstance(mesh, Tessellation) else None
+
+    def _store_mesh(self, key: str, mesh: Tessellation) -> None:
+        if self._snapshots is None or not mesh.positions:
+            return
+        try:
+            blob = pickle.dumps(mesh, protocol=pickle.HIGHEST_PROTOCOL)
+        except Exception:
+            # The caller already has its triangles; the only cost is meshing
+            # this body again in some later process.
+            return
+        self._snapshots.save(self._mesh_store_key(key), blob)
+
     def _mesh_payload(
-        self, result: RecomputeResult, *, packed: bool = False
+        self,
+        result: RecomputeResult,
+        detail: str = Detail.DRAFT,
+        *,
+        packed: bool = False,
     ) -> list[dict[str, object]]:
         meshes: list[dict[str, object]] = []
 
@@ -401,7 +492,7 @@ class ProjectService:
                 )
                 continue
 
-            tessellation = self._tessellate(body.solid)
+            tessellation = self._tessellate(body, detail)
             tags = {ref: str(tag) for ref, tag in body.solid.refs.items()}
             meshes.append(
                 {
@@ -492,7 +583,8 @@ class ProjectService:
                 path="export",
             )
         exporter: BrepExporter = self._kernel  # type: ignore[assignment]
-        return exporter.export_brep(wanted[0][1].handle, fmt)
+        assert wanted[0].solid is not None
+        return exporter.export_brep(wanted[0].solid.handle, fmt)
 
     def cut_paths(
         self, project_id: str, selector: str, body: str | None = None
@@ -822,8 +914,9 @@ class ProjectService:
         document = self._repository.load(project_id)
         result = self._engine(project_id).recompute(document)
         # Opening a document and exporting it is as common as editing one and
-        # exporting it, and a warm that is already done costs a restore.
-        self._warm(project_id)
+        # exporting it. Free when the export geometry is already there, which
+        # after the first open it is.
+        self._warm(project_id, document)
         return {
             "document": document.to_dict(),
             # Packed here and nowhere else. /bodies and /mesh keep plain numbers
@@ -891,17 +984,36 @@ class ProjectService:
         document.validate()
         self._repository.save(project_id, document)
         result = self._engine(project_id).recompute(document)
-        self._warm(project_id)
+        self._warm(project_id, document)
         return result
 
-    def _warm(self, project_id: str) -> None:
+    def _warm(self, project_id: str, document: Document | None = None) -> None:
         """Ask for export-detail geometry to be prepared, if anything will.
 
         On the request path, so it must not raise. A warmer that throws here
         would turn a saved edit into a failed one.
+
+        Skipped when the export-detail geometry is already stored. Deciding that
+        costs a hash of the history and a stat per body; not deciding it costs a
+        second OpenCascade process, spawned on every read of every project, on a
+        server with two cores and a request already waiting on the first one.
+        The check is deliberately here rather than inside the warmer, because
+        this is where a live kernel name is already to hand.
         """
         if self._warmer is None:
             return
+        try:
+            if document is not None and self._engine(project_id).stored(
+                document, Detail.FULL
+            ):
+                return
+        except Exception:
+            # Knowing there is nothing to do is an optimisation, and an
+            # optimisation that cannot answer must not answer with an exception:
+            # this runs inside a read and inside a save. Falling through
+            # schedules a warm, which is what happened before there was anything
+            # to ask.
+            pass
         # Suppressed rather than logged: a warmer is not allowed to matter, and
         # the one that ships already swallows its own failures.
         with contextlib.suppress(Exception):

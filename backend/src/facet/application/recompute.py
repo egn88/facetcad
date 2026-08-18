@@ -118,6 +118,15 @@ class BodyResult:
     outcomes: tuple[FeatureOutcome, ...] = ()
     placement: Frame = field(default_factory=Frame.world)
     error: FacetCADError | None = None
+    #: The content key of the state ``solid`` is actually in — the key of the
+    #: deepest feature that built, which on a history that stopped early is the
+    #: last good one rather than the last declared one.
+    #:
+    #: Exposed because everything derived from a solid is a pure function of it:
+    #: this is what lets a mesh be cached against the geometry rather than
+    #: against a kernel handle, which is reissued on every restore and so could
+    #: never be hit twice.
+    key: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -209,6 +218,36 @@ class _CacheEntry:
 #: name fails there first, which is the prompt to come and bump this.
 SNAPSHOT_FORMAT = 1
 
+#: How much rebuild time has to pile up before the state after it is worth
+#: storing, in milliseconds.
+#:
+#: Only the finished body used to be kept, which is right for the common edit —
+#: appending a feature resumes from the state before it — and useless for the
+#: one that hurts: change something in the middle of a long history in a fresh
+#: process and the only stored state is the one the edit just invalidated, so it
+#: rebuilds from the first feature.
+#:
+#: The obvious fix is a snapshot per feature, and the measurements say no. On the
+#: document this was tuned against an average feature rebuilds in ~10ms and
+#: restores in ~8ms, so storing every one would cost more to write than it could
+#: ever save — half a second of serialisation and several megabytes, to avoid
+#: work that was never expensive. What is worth storing is the state after
+#: something slow: a modelled thread or a fillet over a big face costs seconds,
+#: and a restore costs the same ~8ms it always does.
+#:
+#: So the threshold is in units of the thing being avoided. Measured on the
+#: tapped-cavity document, whose modelled thread costs about a second: editing
+#: the hole *after* the thread, in a fresh process, went from 530ms to 137ms,
+#: for one extra 200kB entry and 1-2% on the build that wrote it.
+#:
+#: Measured on the fourteen-body document at the same setting: nothing at all.
+#: No feature there reaches the threshold, so no checkpoint is written, the
+#: store stays the same size and the build takes the same time. That is the
+#: intended answer, not a disappointing one — dropping the threshold to zero on
+#: that document made a cold edit *slower*, 452ms against 535ms, because
+#: restoring a checkpoint two cheap features up costs more than rebuilding them.
+CHECKPOINT_MS = 250.0
+
 
 @dataclass(frozen=True)
 class _Snapshot:
@@ -255,9 +294,16 @@ class RecomputeEngine:
     """
 
     def __init__(
-        self, kernel: GeometryKernel, snapshots: SnapshotStore | None = None
+        self,
+        kernel: GeometryKernel,
+        snapshots: SnapshotStore | None = None,
+        *,
+        checkpoint_ms: float = CHECKPOINT_MS,
     ) -> None:
         self._kernel = kernel
+        # See CHECKPOINT_MS. Injected so a test can ask for a checkpoint after
+        # every feature without needing a feature that takes a quarter second.
+        self._checkpoint_ms = checkpoint_ms
         # Where built geometry goes so the *next* process does not rebuild it.
         # Optional, and every failure path through it is a miss: the in-memory
         # cache below is the fast path within a session, and this one exists
@@ -335,9 +381,12 @@ class RecomputeEngine:
         current: NamedSolid | None = None
         upstream_key = ""
         halted = False
+        #: Rebuild time accumulated since the last state was written to the
+        #: store, which is what decides the next checkpoint.
+        unsaved = 0.0
 
         # The key chain costs no geometry, so it can be worked out for the whole
-        # history up front — which is what lets a snapshot of the *last* feature
+        # history up front — which is what lets a state of the *last* feature
         # be found without building the thirty-four before it. Walking the
         # features first and looking for the cached one last would never reach
         # it: the first miss rebuilds, and after that every key still matches
@@ -421,15 +470,26 @@ class RecomputeEngine:
                 halted = True
                 continue
 
+            elapsed = (time.perf_counter() - started) * 1000
             self._cache[slot] = _CacheEntry(key=key, solid=current)
             upstream_key = key
+
+            # Enough work has piled up behind this state to be worth keeping, so
+            # an edit above it in a later process resumes here instead of at the
+            # first feature. Deliberately measured in time rather than in
+            # features: see CHECKPOINT_MS.
+            unsaved += elapsed
+            if unsaved >= self._checkpoint_ms:
+                self._store(body.id, detail, key, current)
+                unsaved = 0.0
+
             outcomes.append(
                 FeatureOutcome(
                     id=spec.id,
                     type=spec.type,
                     status=FeatureStatus.BUILT,
                     warnings=notes,
-                    duration_ms=(time.perf_counter() - started) * 1000,
+                    duration_ms=elapsed,
                     face_count=len(current.topology.faces),
                 )
             )
@@ -440,6 +500,7 @@ class RecomputeEngine:
             solid=current,
             outcomes=tuple(outcomes),
             placement=placement,
+            key=upstream_key or None,
         )
 
     # -- snapshots ---------------------------------------------------------
@@ -466,6 +527,54 @@ class RecomputeEngine:
             keys.append(upstream)
         return keys
 
+    def stored(self, document: Document, detail: str = Detail.DRAFT) -> bool:
+        """Whether every body's finished state is already in the store.
+
+        Answered without building anything: resolving the parameters and hashing
+        the history is all it takes to know what a rebuild would produce, which
+        is what a content-addressed cache is *for*. The cost is one existence
+        probe per body.
+
+        The caller is whoever is about to spend real money — starting a second
+        OpenCascade process to warm export geometry, most of all. Reading a
+        project scheduled one of those every time, and on a two-core server that
+        second process competes with the request the user is waiting on.
+
+        False when the document cannot even resolve, because then nothing is
+        known rather than nothing is needed.
+        """
+        if self._snapshots is None:
+            return False
+        try:
+            parameters = document.parameters.resolve()
+            frames = document.datums.resolve_all(parameters)
+        except FacetCADError:
+            return False
+
+        for body in document.bodies:
+            keys = self._key_chain(body, document, parameters, frames)
+            final = next((key for key in reversed(keys) if key is not None), None)
+            if final is None:
+                # Nothing to build, so nothing can be missing.
+                continue
+            if not self._already_stored(self._snapshot_key(body.id, detail, final)):
+                return False
+        return True
+
+    def _already_stored(self, key: str) -> bool:
+        """Whether the store holds this, for a caller deciding whether to work.
+
+        A store that cannot say answers no, and the caller does the work — the
+        same degradation every other path through the store takes, and the
+        reason a broken cache is a slow server rather than a failed one.
+        """
+        if self._snapshots is None:
+            return False
+        try:
+            return self._snapshots.has(key)
+        except Exception:
+            return False
+
     def _snapshot_key(self, body_id: str, detail: str, key: str) -> str:
         blob = f"{SNAPSHOT_FORMAT}/{self._kernel.name}/{detail}/{body_id}/{key}"
         return hashlib.sha256(blob.encode()).hexdigest()
@@ -480,36 +589,66 @@ class RecomputeEngine:
         frames: Mapping[str, Frame],
         outcomes: list[FeatureOutcome],
     ) -> tuple[int, NamedSolid] | None:
-        """Start from a stored solid, if one matches a state this build reaches.
+        """Start from the deepest state already available, wherever it lives.
 
         Searched from the end backwards, so the longest usable prefix wins: on
         opening a document that is the whole history, and after appending a
         feature it is everything but the new one.
 
-        Appends ``outcomes`` for the features the snapshot accounts for. They
-        report ``CACHED`` because nothing was recomputed, and no face count,
-        because no per-feature state exists to count — only the state they add
-        up to.
-        """
-        if self._snapshots is None:
-            return None
+        At each depth the in-process cache is asked *before* the snapshot store,
+        and that ordering is the whole point of this method. A restore is not
+        free — it reads a file, sends the bytes to the kernel, and has the kernel
+        re-derive and re-check every face's fingerprint before it will trust the
+        names — while a solid this process already holds costs a dict lookup.
+        Reaching for the store first meant a warm server paid the cold price on
+        every request: fourteen bodies restored and re-tessellated to answer a
+        question it had already answered, 300ms against 55ms on the document that
+        prompted this.
 
+        The search is still by depth rather than by source, because a *deeper*
+        stored state beats a shallower remembered one — after an edit early in a
+        long history, the snapshot of the state just before it saves far more
+        than the memory of the state before that.
+
+        Appends ``outcomes`` for the features the resumed state accounts for.
+        They report ``CACHED`` because nothing was recomputed, and a face count
+        only where this process happens to hold that feature's own state: a
+        restored solid is the sum of its history, with nothing per-feature left
+        to count.
+        """
         for index in range(len(keys) - 1, -1, -1):
             key = keys[index]
             if key is None:
                 continue
-            restored = self._load(body.id, detail, key)
-            if restored is None:
+
+            slot = f"{detail}/{body.id}/{body.features[index].id}"
+            remembered = self._cache.get(slot)
+            if remembered is not None and remembered.key == key:
+                resumed = remembered.solid
+            elif self._snapshots is None:
                 continue
+            else:
+                loaded = self._load(body.id, detail, key)
+                if loaded is None:
+                    continue
+                # Seeded so the next rebuild in this process finds it here and
+                # does not go back to the store.
+                self._cache[slot] = _CacheEntry(key=key, solid=loaded)
+                resumed = loaded
 
             # Frames must be registered for the features that were *not* run.
             # Split ordering resolves fragments in the owning feature's frame, so
             # a later feature splitting a face that belongs to a skipped one
             # would otherwise order its fragments in the world frame and pick
-            # different ordinals than a full rebuild. The same reason a cache hit
-            # re-registers, one prefix at a time instead of one feature.
-            for spec in body.features[: index + 1]:
+            # different ordinals than a full rebuild.
+            for position, spec in enumerate(body.features[: index + 1]):
                 _reregister_frames(naming, document, spec, frames)
+                held = self._cache.get(f"{detail}/{body.id}/{spec.id}")
+                known = (
+                    held.solid
+                    if held is not None and held.key == keys[position]
+                    else None
+                )
                 outcomes.append(
                     FeatureOutcome(
                         id=spec.id,
@@ -519,13 +658,10 @@ class RecomputeEngine:
                             if spec.suppressed
                             else FeatureStatus.CACHED
                         ),
+                        face_count=len(known.topology.faces) if known else 0,
                     )
                 )
-            # Seeded so a second rebuild in this process needs no restore at all.
-            self._cache[f"{detail}/{body.id}/{body.features[index].id}"] = _CacheEntry(
-                key=key, solid=restored
-            )
-            return index, restored
+            return index, resumed
         return None
 
     def _load(self, body_id: str, detail: str, key: str) -> NamedSolid | None:
@@ -577,37 +713,57 @@ class RecomputeEngine:
 
         Only the final state, and only when every feature is accounted for. A
         history that stopped early would be stored under the key of a state it
-        never reached.
+        never reached. States *within* a history are kept too, but only where
+        they were expensive enough to be worth it — see CHECKPOINT_MS.
         """
-        if self._snapshots is None or current is None:
+        if current is None:
             return
         if any(o.status in (FeatureStatus.FAILED, FeatureStatus.SKIPPED) for o in outcomes):
             return
         final = next((key for key in reversed(keys) if key is not None), None)
         if final is None:
             return
+        self._store(body.id, detail, final, current)
+
+    def _store(self, body_id: str, detail: str, key: str, solid: NamedSolid) -> None:
+        """Write one state to the store, if it is not already there.
+
+        Every failure is silent. The rebuild has already succeeded and the caller
+        has its answer; the only cost of not storing is a colder start later.
+        """
+        if self._snapshots is None:
+            return
+
+        # Already there, and the key says the bytes would be identical. Asked
+        # rather than assumed from the outcomes, so a store that was added since
+        # the last run — or that quietly failed a write — still gets filled.
+        # Worth the question: without it a warm rebuild re-serialised every body
+        # through the kernel and rewrote half a megabyte on every request, which
+        # was 33ms of the 73 a warm rebuild had left.
+        stored_at = self._snapshot_key(body_id, detail, key)
+        if self._already_stored(stored_at):
+            return
 
         take = getattr(self._kernel, "snapshot", None)
         if take is None:
             return
         try:
-            geometry = take(current.handle)
+            geometry = take(solid.handle)
             blob = pickle.dumps(
                 _Snapshot(
                     format=SNAPSHOT_FORMAT,
                     kernel=self._kernel.name,
-                    key=final,
+                    key=key,
                     geometry=geometry,
-                    solid=current,
+                    solid=solid,
                 ),
                 protocol=pickle.HIGHEST_PROTOCOL,
             )
         except Exception:
             # A kernel that cannot serialise this solid, or a solid holding
-            # something that will not pickle. The rebuild already succeeded and
-            # the caller has its answer; the only cost is a cold start later.
+            # something that will not pickle.
             return
-        self._snapshots.save(self._snapshot_key(body.id, detail, final), blob)
+        self._snapshots.save(stored_at, blob)
 
     # -- one feature -------------------------------------------------------
 

@@ -441,11 +441,17 @@ would be nowhere to put the result) and without `FACET_GEOMETRY_ISOLATION`, beca
 in-process kernel on a background thread holds the interpreter lock for the whole rebuild
 — the exact freeze the child process exists to prevent.
 
-`FACET_CACHE` points the store somewhere other than `<FACET_DATA>/../snapshots`, and
-`FACET_CACHE=off` turns it off. The directory is derived data and safe to delete at any
-time; it is kept out of the projects directory so that backing up your models does not
-mean backing up a gigabyte of B-reps. It is capped at 512 MB and evicts least-recently-used
+`FACET_CACHE` points the store somewhere other than `/data/derived`, and `FACET_CACHE=off`
+turns it off. It holds both halves of what a rebuild produces — the solids, and the
+triangles that were tessellated from them — each under a hash of the state it belongs to.
+The directory is derived data and safe to delete at any time; it is kept out of the
+projects directory, and on its own volume, so that backing up your models does not mean
+backing up a gigabyte of B-reps. It is capped at 512 MB and evicts least-recently-used
 entries.
+
+That volume is the difference between a release that starts warm and one that starts cold.
+Left in the container's writable layer it is discarded on every deploy, and opening a
+fourteen-body model then costs a full rebuild rather than a restore.
 
 The OCCT image is ~850 MB, most of it OpenCascade itself. The build strips the parts of
 `cadquery-ocp` this project never imports — matplotlib, and every VTK library outside

@@ -22,6 +22,9 @@ services:
       # analytic kernel, so the stack runs before that dependency is added.
       FACET_KERNEL: ${FACET_KERNEL:-auto}
       FACET_DATA: /data/projects
+      # Built geometry and meshes. Set to "off" to rebuild everything on every
+      # start, which is what a benchmark wants and nothing else does.
+      FACET_CACHE: ${FACET_CACHE:-/data/derived}
       # Hostnames the MCP endpoint answers to, comma separated. The transport
       # refuses unknown hosts to guard against DNS rebinding; loopback is always
       # allowed. Set to "*" only when a reverse proxy has already vetted Host.
@@ -30,6 +33,11 @@ services:
       # Documents are plain YAML on a volume: backing up or cloning a project
       # is a file copy.
       - facet-projects:/data/projects
+      # Everything the kernel worked out from them. A separate volume because it
+      # is disposable — deleting it costs the next open a rebuild and nothing
+      # else — and because "back up the projects" must not come to mean "back up
+      # a gigabyte of B-reps".
+      - facet-derived:/data/derived
     restart: unless-stopped
 
   web:
@@ -42,6 +50,9 @@ services:
     restart: unless-stopped
 
 volumes:
+  facet-derived:
+    # Not named explicitly, unlike the documents below: losing this one costs a
+    # rebuild, so it does not need protecting from a rename.
   facet-projects:
     # Named explicitly, so it is not prefixed with the compose project. Renaming
     # the project — or the directory it is checked out into — would otherwise

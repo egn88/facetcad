@@ -83,11 +83,21 @@ print('OCCT verified: fillet and STEP both work')"
 
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
-    FACET_DATA=/data/projects
+    FACET_DATA=/data/projects \
+    # Built geometry and meshes, kept apart from the documents because the two
+    # want opposite things from a backup: the documents are the model, this is
+    # derived and can always be recomputed. Its own path so it can be its own
+    # volume — mounting it is what stops a release starting every project cold.
+    FACET_CACHE=/data/derived
 
 # Never run as root.
+#
+# Both directories are created here rather than left to the mount, because
+# Docker seeds an empty named volume from the image's directory: without one to
+# copy, the volume arrives owned by root, the store finds it unwritable, and the
+# cache silently disables itself on a server that looks otherwise healthy.
 RUN useradd --create-home --uid 10001 facet \
- && mkdir -p /data/projects \
+ && mkdir -p /data/projects /data/derived \
  && chown -R facet /data
 USER facet
 WORKDIR /app
