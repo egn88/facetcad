@@ -218,6 +218,36 @@ class _CacheEntry:
 #: name fails there first, which is the prompt to come and bump this.
 SNAPSHOT_FORMAT = 1
 
+#: How much rebuild time has to pile up before the state after it is worth
+#: storing, in milliseconds.
+#:
+#: Only the finished body used to be kept, which is right for the common edit —
+#: appending a feature resumes from the state before it — and useless for the
+#: one that hurts: change something in the middle of a long history in a fresh
+#: process and the only stored state is the one the edit just invalidated, so it
+#: rebuilds from the first feature.
+#:
+#: The obvious fix is a snapshot per feature, and the measurements say no. On the
+#: document this was tuned against an average feature rebuilds in ~10ms and
+#: restores in ~8ms, so storing every one would cost more to write than it could
+#: ever save — half a second of serialisation and several megabytes, to avoid
+#: work that was never expensive. What is worth storing is the state after
+#: something slow: a modelled thread or a fillet over a big face costs seconds,
+#: and a restore costs the same ~8ms it always does.
+#:
+#: So the threshold is in units of the thing being avoided. Measured on the
+#: tapped-cavity document, whose modelled thread costs about a second: editing
+#: the hole *after* the thread, in a fresh process, went from 530ms to 137ms,
+#: for one extra 200kB entry and 1-2% on the build that wrote it.
+#:
+#: Measured on the fourteen-body document at the same setting: nothing at all.
+#: No feature there reaches the threshold, so no checkpoint is written, the
+#: store stays the same size and the build takes the same time. That is the
+#: intended answer, not a disappointing one — dropping the threshold to zero on
+#: that document made a cold edit *slower*, 452ms against 535ms, because
+#: restoring a checkpoint two cheap features up costs more than rebuilding them.
+CHECKPOINT_MS = 250.0
+
 
 @dataclass(frozen=True)
 class _Snapshot:
@@ -264,9 +294,16 @@ class RecomputeEngine:
     """
 
     def __init__(
-        self, kernel: GeometryKernel, snapshots: SnapshotStore | None = None
+        self,
+        kernel: GeometryKernel,
+        snapshots: SnapshotStore | None = None,
+        *,
+        checkpoint_ms: float = CHECKPOINT_MS,
     ) -> None:
         self._kernel = kernel
+        # See CHECKPOINT_MS. Injected so a test can ask for a checkpoint after
+        # every feature without needing a feature that takes a quarter second.
+        self._checkpoint_ms = checkpoint_ms
         # Where built geometry goes so the *next* process does not rebuild it.
         # Optional, and every failure path through it is a miss: the in-memory
         # cache below is the fast path within a session, and this one exists
@@ -344,6 +381,9 @@ class RecomputeEngine:
         current: NamedSolid | None = None
         upstream_key = ""
         halted = False
+        #: Rebuild time accumulated since the last state was written to the
+        #: store, which is what decides the next checkpoint.
+        unsaved = 0.0
 
         # The key chain costs no geometry, so it can be worked out for the whole
         # history up front — which is what lets a state of the *last* feature
@@ -430,15 +470,26 @@ class RecomputeEngine:
                 halted = True
                 continue
 
+            elapsed = (time.perf_counter() - started) * 1000
             self._cache[slot] = _CacheEntry(key=key, solid=current)
             upstream_key = key
+
+            # Enough work has piled up behind this state to be worth keeping, so
+            # an edit above it in a later process resumes here instead of at the
+            # first feature. Deliberately measured in time rather than in
+            # features: see CHECKPOINT_MS.
+            unsaved += elapsed
+            if unsaved >= self._checkpoint_ms:
+                self._store(body.id, detail, key, current)
+                unsaved = 0.0
+
             outcomes.append(
                 FeatureOutcome(
                     id=spec.id,
                     type=spec.type,
                     status=FeatureStatus.BUILT,
                     warnings=notes,
-                    duration_ms=(time.perf_counter() - started) * 1000,
+                    duration_ms=elapsed,
                     face_count=len(current.topology.faces),
                 )
             )
@@ -648,14 +699,25 @@ class RecomputeEngine:
 
         Only the final state, and only when every feature is accounted for. A
         history that stopped early would be stored under the key of a state it
-        never reached.
+        never reached. States *within* a history are kept too, but only where
+        they were expensive enough to be worth it — see CHECKPOINT_MS.
         """
-        if self._snapshots is None or current is None:
+        if current is None:
             return
         if any(o.status in (FeatureStatus.FAILED, FeatureStatus.SKIPPED) for o in outcomes):
             return
         final = next((key for key in reversed(keys) if key is not None), None)
         if final is None:
+            return
+        self._store(body.id, detail, final, current)
+
+    def _store(self, body_id: str, detail: str, key: str, solid: NamedSolid) -> None:
+        """Write one state to the store, if it is not already there.
+
+        Every failure is silent. The rebuild has already succeeded and the caller
+        has its answer; the only cost of not storing is a colder start later.
+        """
+        if self._snapshots is None:
             return
 
         # Already there, and the key says the bytes would be identical. Asked
@@ -664,30 +726,30 @@ class RecomputeEngine:
         # Worth the question: without it a warm rebuild re-serialised every body
         # through the kernel and rewrote half a megabyte on every request, which
         # was 33ms of the 73 a warm rebuild had left.
-        if self._snapshots.has(self._snapshot_key(body.id, detail, final)):
+        stored_at = self._snapshot_key(body_id, detail, key)
+        if self._snapshots.has(stored_at):
             return
 
         take = getattr(self._kernel, "snapshot", None)
         if take is None:
             return
         try:
-            geometry = take(current.handle)
+            geometry = take(solid.handle)
             blob = pickle.dumps(
                 _Snapshot(
                     format=SNAPSHOT_FORMAT,
                     kernel=self._kernel.name,
-                    key=final,
+                    key=key,
                     geometry=geometry,
-                    solid=current,
+                    solid=solid,
                 ),
                 protocol=pickle.HIGHEST_PROTOCOL,
             )
         except Exception:
             # A kernel that cannot serialise this solid, or a solid holding
-            # something that will not pickle. The rebuild already succeeded and
-            # the caller has its answer; the only cost is a cold start later.
+            # something that will not pickle.
             return
-        self._snapshots.save(self._snapshot_key(body.id, detail, final), blob)
+        self._snapshots.save(stored_at, blob)
 
     # -- one feature -------------------------------------------------------
 

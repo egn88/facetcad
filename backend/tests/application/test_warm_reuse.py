@@ -324,3 +324,89 @@ def test_a_service_without_a_store_still_draws(
 
     assert first["bodies"] == second["bodies"]
     assert kernel.tessellations == 1
+
+
+# --------------------------------------------------------------------------
+# Expensive states are kept, so an edit in the middle is not a full rebuild
+# --------------------------------------------------------------------------
+
+
+def deepen_the_slot(depth: float) -> Document:
+    """The bracket with its *last* feature changed, invalidating only itself."""
+    data = copy.deepcopy(BRACKET)
+    for row in data["parameters"]:  # type: ignore[index]
+        if row["name"] == "slot_d":
+            row["value"] = depth
+            row.pop("expr", None)
+    return Document.from_dict(data)
+
+
+def test_a_checkpointed_prefix_survives_an_edit_above_it(store: MemoryStore) -> None:
+    """The case only the final state could never cover.
+
+    Editing the last feature makes the stored final state worthless, and with
+    nothing else kept a fresh process rebuilds the whole history to reach the
+    state it was already holding a snapshot of one feature earlier.
+    """
+    RecomputeEngine(FakeKernel(), store, checkpoint_ms=0.0).recompute(
+        deepen_the_slot(3.0)
+    )
+
+    result = RecomputeEngine(FakeKernel(), store).recompute(deepen_the_slot(4.0))
+
+    assert [o.status for o in result.outcomes] == [
+        FeatureStatus.CACHED,
+        FeatureStatus.BUILT,
+    ]
+
+
+def test_without_checkpoints_the_same_edit_rebuilds_everything(
+    store: MemoryStore,
+) -> None:
+    """The behaviour above is bought, not free — this is what it costs to skip.
+
+    A cheap history is deliberately left in this state: storing a prefix that
+    rebuilds in ten milliseconds costs more to write than it saves.
+    """
+    RecomputeEngine(FakeKernel(), store).recompute(deepen_the_slot(3.0))
+
+    result = RecomputeEngine(FakeKernel(), store).recompute(deepen_the_slot(4.0))
+
+    assert [o.status for o in result.outcomes] == [
+        FeatureStatus.BUILT,
+        FeatureStatus.BUILT,
+    ]
+
+
+def test_a_checkpointed_state_names_faces_the_same_way(store: MemoryStore) -> None:
+    """A resumed prefix is only useful if it is the same model.
+
+    The assertion every other one here rests on: reuse that renames a face is
+    worse than no reuse at all, because a stored selector then resolves
+    somewhere else.
+    """
+    RecomputeEngine(FakeKernel(), store, checkpoint_ms=0.0).recompute(
+        deepen_the_slot(3.0)
+    )
+
+    resumed = RecomputeEngine(FakeKernel(), store).recompute(deepen_the_slot(4.0))
+    fresh = RecomputeEngine(FakeKernel(), None).recompute(deepen_the_slot(4.0))
+
+    assert resumed.ok
+    assert sorted(str(f.tag) for f in resumed.topology.faces) == sorted(
+        str(f.tag) for f in fresh.topology.faces
+    )
+
+
+def test_a_checkpoint_is_not_written_twice(store: MemoryStore) -> None:
+    """The final state is checkpointed and then kept; it is stored once."""
+    RecomputeEngine(FakeKernel(), store, checkpoint_ms=0.0).recompute(bracket_doc())
+    written = store.saves
+
+    RecomputeEngine(FakeKernel(), store, checkpoint_ms=0.0).recompute(bracket_doc())
+
+    assert store.saves == written
+
+
+def bracket_doc() -> Document:
+    return Document.from_dict(BRACKET)
