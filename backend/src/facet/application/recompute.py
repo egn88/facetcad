@@ -557,9 +557,23 @@ class RecomputeEngine:
             if final is None:
                 # Nothing to build, so nothing can be missing.
                 continue
-            if not self._snapshots.has(self._snapshot_key(body.id, detail, final)):
+            if not self._already_stored(self._snapshot_key(body.id, detail, final)):
                 return False
         return True
+
+    def _already_stored(self, key: str) -> bool:
+        """Whether the store holds this, for a caller deciding whether to work.
+
+        A store that cannot say answers no, and the caller does the work — the
+        same degradation every other path through the store takes, and the
+        reason a broken cache is a slow server rather than a failed one.
+        """
+        if self._snapshots is None:
+            return False
+        try:
+            return self._snapshots.has(key)
+        except Exception:
+            return False
 
     def _snapshot_key(self, body_id: str, detail: str, key: str) -> str:
         blob = f"{SNAPSHOT_FORMAT}/{self._kernel.name}/{detail}/{body_id}/{key}"
@@ -727,7 +741,7 @@ class RecomputeEngine:
         # through the kernel and rewrote half a megabyte on every request, which
         # was 33ms of the 73 a warm rebuild had left.
         stored_at = self._snapshot_key(body_id, detail, key)
-        if self._snapshots.has(stored_at):
+        if self._already_stored(stored_at):
             return
 
         take = getattr(self._kernel, "snapshot", None)

@@ -1002,8 +1002,18 @@ class ProjectService:
         """
         if self._warmer is None:
             return
-        if document is not None and self._engine(project_id).stored(document, Detail.FULL):
-            return
+        try:
+            if document is not None and self._engine(project_id).stored(
+                document, Detail.FULL
+            ):
+                return
+        except Exception:
+            # Knowing there is nothing to do is an optimisation, and an
+            # optimisation that cannot answer must not answer with an exception:
+            # this runs inside a read and inside a save. Falling through
+            # schedules a warm, which is what happened before there was anything
+            # to ask.
+            pass
         # Suppressed rather than logged: a warmer is not allowed to matter, and
         # the one that ships already swallows its own failures.
         with contextlib.suppress(Exception):

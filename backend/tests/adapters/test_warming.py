@@ -449,3 +449,34 @@ def test_a_service_without_a_store_always_schedules(
     service.view_state("bracket")
     service.view_state("bracket")
     assert counter.scheduled == ["bracket", "bracket"]
+
+
+def test_a_store_that_cannot_answer_does_not_break_the_read(
+    repository: FilesystemDocumentRepository,
+) -> None:
+    """Deciding not to warm is an optimisation, and must fail like one.
+
+    It runs inside a read and inside a save, so a store that raises has to cost
+    a pointless warm rather than the request.
+    """
+
+    class Hostile:
+        def has(self, key: str) -> bool:
+            raise RuntimeError("the volume went away")
+
+        def load(self, key: str) -> bytes | None:
+            return None
+
+        def save(self, key: str, blob: bytes) -> None:
+            return
+
+        def clear(self) -> None:
+            return
+
+    counter = CountingWarmer()
+    service = ProjectService(
+        repository, FakeKernel(), snapshots=Hostile(), warmer=counter
+    )
+
+    assert service.view_state("bracket")["build"]["ok"] is True
+    assert counter.scheduled == ["bracket"]
