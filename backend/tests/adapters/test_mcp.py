@@ -131,6 +131,23 @@ def test_the_tools_cover_discovery_building_understanding_and_export(
     assert {"export", "export_cut_path", "export_enclosure"} <= names
 
 
+def test_the_tools_cover_the_document_operations_the_api_offers(
+    tools: MCPServer[Any],
+) -> None:
+    """An operation the API has and the tools do not is one an agent cannot reach.
+
+    It has no other route to the server: no shell, no URL building, nothing but
+    this list. A gap here is a feature that, from where the agent sits, does not
+    exist.
+    """
+    names = {tool.name for tool in listed(tools)}
+    assert {"delete_project", "replace_document", "import_parameters"} <= names
+    assert {"edit_parameter", "delete_parameter", "parameter_usage"} <= names
+    assert {"delete_sketch", "delete_datum", "delete_feature"} <= names
+    assert {"add_body", "move_body", "delete_body"} <= names
+    assert "guide" in names
+
+
 def test_add_feature_warns_that_a_selector_is_re_resolved_on_every_rebuild(
     tools: MCPServer[Any],
 ) -> None:
@@ -216,16 +233,26 @@ def test_a_topology_answers_with_tags_and_never_with_fingerprints(
     """
     api.on(
         "GET",
-        "/api/projects/bracket/topology",
+        "/api/projects/bracket/topologies",
         json={
-            "faces": [
-                {"tag": "base/cap+", "fingerprint": {"centroid": [1.0, 2.0, 3.0]}},
-                {"tag": "base/side[outline.left]", "fingerprint": {"centroid": [0.0, 0.0, 0.0]}},
-            ],
-            "edges": [{"tag": "base/cap+ ^ base/side[outline.left]", "fingerprint": {}}],
-            "retired": [
-                {"tag": "slot/floor", "reason": "consumed", "retired_by": "merge_1"}
-            ],
+            "bodies": [
+                {
+                    "id": "main",
+                    "faces": [
+                        {"tag": "base/cap+", "fingerprint": {"centroid": [1.0, 2.0, 3.0]}},
+                        {
+                            "tag": "base/side[outline.left]",
+                            "fingerprint": {"centroid": [0.0, 0.0, 0.0]},
+                        },
+                    ],
+                    "edges": [
+                        {"tag": "base/cap+ ^ base/side[outline.left]", "fingerprint": {}}
+                    ],
+                    "retired": [
+                        {"tag": "slot/floor", "reason": "consumed", "retired_by": "merge_1"}
+                    ],
+                }
+            ]
         },
     )
 
@@ -237,6 +264,190 @@ def test_a_topology_answers_with_tags_and_never_with_fingerprints(
         {"tag": "slot/floor", "reason": "consumed", "retiredBy": "merge_1"}
     ]
     assert "fingerprint" not in json.dumps(result)
+
+
+def two_bodies() -> dict[str, Any]:
+    """A plate and a pin, each with its own named geometry."""
+    return {
+        "bodies": [
+            {
+                "id": "plate",
+                "faces": [{"tag": "slab/cap+", "fingerprint": {}}],
+                "edges": [],
+                "retired": [],
+            },
+            {
+                "id": "pin",
+                "faces": [
+                    {"tag": "shank/cap+", "fingerprint": {}},
+                    {"tag": "shank/side[shaft.rim]", "fingerprint": {}},
+                ],
+                "edges": [],
+                "retired": [],
+            },
+        ]
+    }
+
+
+def test_a_second_body_is_not_left_out_of_the_topology(
+    tools: MCPServer[Any], api: FakeApi
+) -> None:
+    """The single-body endpoint answers for the first body and says nothing of the rest.
+
+    An agent reading it on a two-part model concludes the second part has no
+    faces, which is the one wrong belief that cannot be recovered from: it will
+    write selectors for faces it was never shown, or decide the ones it can see
+    are all there is.
+    """
+    api.on("GET", "/api/projects/assembly/topologies", json=two_bodies())
+
+    result = call(tools, "topology", project="assembly")
+
+    assert [body["id"] for body in result["bodies"]] == ["plate", "pin"]
+    assert result["bodies"][1]["faces"] == ["shank/cap+", "shank/side[shaft.rim]"]
+    assert result["counts"]["faces"] == 3
+
+
+def test_one_body_can_be_asked_for_by_name(tools: MCPServer[Any], api: FakeApi) -> None:
+    """Which part a face is on is what `export(body=...)` needs to be told."""
+    api.on("GET", "/api/projects/assembly/topologies", json=two_bodies())
+
+    result = call(tools, "topology", project="assembly", body="pin")
+
+    assert result["body"] == "pin"
+    assert result["faces"] == ["shank/cap+", "shank/side[shaft.rim]"]
+
+    with pytest.raises(ToolError, match="plate, pin"):
+        call(tools, "topology", project="assembly", body="ghost")
+
+
+def test_a_selector_that_names_another_body_is_told_so_rather_than_left_wrong(
+    tools: MCPServer[Any], api: FakeApi
+) -> None:
+    """The API resolves against the first body, and a face on the second is simply absent.
+
+    Zero matches on a tag that plainly exists reads as "you typed it wrong",
+    and an agent that believes that rewrites a selector that was already right.
+    """
+    api.on(
+        "POST",
+        "/api/projects/assembly/resolve",
+        json={"selector": "shank/cap+", "matched": [], "count": 0, "ok": False, "error": None},
+    )
+    api.on("GET", "/api/projects/assembly/topologies", json=two_bodies())
+
+    result = call(tools, "resolve_selector", project="assembly", selector="shank/cap+")
+
+    assert result["count"] == 0
+    assert "'pin'" in result["note"]
+    assert "first body" in result["note"]
+
+
+def test_a_selector_that_matches_costs_no_second_request(
+    tools: MCPServer[Any], api: FakeApi
+) -> None:
+    """The hint is worth a round trip only where it changes what happens next."""
+    api.on(
+        "POST",
+        "/api/projects/assembly/resolve",
+        json={
+            "selector": "slab/cap+",
+            "matched": ["slab/cap+"],
+            "count": 1,
+            "ok": True,
+            "error": None,
+        },
+    )
+
+    result = call(tools, "resolve_selector", project="assembly", selector="slab/cap+")
+
+    assert "note" not in result
+    assert [request.url.path for request in api.seen] == ["/api/projects/assembly/resolve"]
+
+
+def test_an_ignored_option_is_reported_rather_than_left_silent(
+    tools: MCPServer[Any], api: FakeApi
+) -> None:
+    """A key the feature type does not read is warned about, not refused, on a rebuild.
+
+    That was the point of the warning: refusing would break documents that have
+    always built. It only works if the warning arrives — a report that drops it
+    restores the exact silence that made a counterbore on a pad expensive to
+    diagnose.
+    """
+    api.on(
+        "PATCH",
+        "/api/projects/bracket/parameters",
+        json=recompute_result(
+            features=[
+                {
+                    "id": "base",
+                    "type": "pad",
+                    "status": "built",
+                    "error": None,
+                    "warnings": ["pad does not take 'counterbore_depth'"],
+                }
+            ]
+        ),
+    )
+
+    report = call(tools, "set_parameters", project="bracket", changes={"plate_w": 160})
+
+    assert report["ok"] is True
+    assert report["warnings"] == ["base: pad does not take 'counterbore_depth'"]
+    assert report["features"][0]["warnings"] == ["pad does not take 'counterbore_depth'"]
+
+
+def test_a_blend_that_was_allowed_to_fail_is_not_counted_as_a_failure(
+    tools: MCPServer[Any], api: FakeApi
+) -> None:
+    """`on_failure: skip` means the build carried on, not that nothing happened.
+
+    It carries an error and a healthy model, so reading the error as a failure
+    would make every such document look broken — and reading the model as fine
+    would hide a fillet that never got cut. It is its own outcome.
+    """
+    api.on(
+        "POST",
+        "/api/projects/bracket/recompute",
+        json=recompute_result(
+            features=[
+                {"id": "base", "type": "pad", "status": "built", "error": None},
+                {
+                    "id": "soften",
+                    "type": "fillet",
+                    "status": "bypassed",
+                    "error": {"message": "radius 2 does not fit at that corner"},
+                },
+            ]
+        ),
+    )
+
+    report = call(tools, "recompute", project="bracket")
+
+    assert report["ok"] is True
+    assert report["failures"] == []
+    assert [row["id"] for row in report["bypassed"]] == ["soften"]
+
+
+def test_a_forced_rebuild_says_so_on_the_wire(tools: MCPServer[Any], api: FakeApi) -> None:
+    """The flag is the whole difference between reusing the cache and not."""
+    api.on("POST", "/api/projects/bracket/recompute", json=recompute_result())
+
+    call(tools, "recompute", project="bracket", force=True)
+    assert api.seen[-1].url.params.get("force") == "true"
+
+    call(tools, "recompute", project="bracket")
+    assert "force" not in api.seen[-1].url.params
+
+
+def test_deleting_a_project_survives_an_answer_with_no_body(
+    tools: MCPServer[Any], api: FakeApi
+) -> None:
+    """A 204 has nothing to parse, and reporting it as a failure would be a lie."""
+    api.on("DELETE", "/api/projects/bracket", status=204)
+
+    assert call(tools, "delete_project", project="bracket") == {"deleted": "bracket"}
 
 
 # --------------------------------------------------------------------------
@@ -298,6 +509,54 @@ def test_a_missing_project_says_so_rather_than_reporting_a_status_code(
         call(tools, "recompute", project="ghost")
 
 
+def test_a_busy_kernel_is_reported_as_worth_retrying(
+    tools: MCPServer[Any], api: FakeApi
+) -> None:
+    """Geometry is one worker, so a request can be turned away without being wrong.
+
+    The server distinguishes the two with Retry-After. Losing that distinction
+    leaves an agent reading "refused" and editing a model that was fine.
+    """
+    api.on(
+        "POST",
+        "/api/projects/bracket/recompute",
+        status=503,
+        json={"detail": {"message": "the geometry worker was busy for more than 30s"}},
+        headers={"Retry-After": "5"},
+    )
+
+    with pytest.raises(ToolError) as raised:
+        call(tools, "recompute", project="bracket")
+
+    text = str(raised.value)
+    assert "busy" in text
+    assert "retrying in about 5s" in text
+    assert "nothing was changed" in text
+
+
+def test_a_slow_rebuild_is_not_reported_as_a_bad_address(tools: MCPServer[Any]) -> None:
+    """The two have opposite remedies, and only one of them is 'check FACET_URL'.
+
+    A rebuild queued behind a slow one can legitimately take longer than a
+    minute, and calling that unreachable sent an agent to verify a URL that was
+    never wrong.
+    """
+    def timeout(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    slow = build_server(
+        FacetCADClient(BASE_URL, transport=httpx.MockTransport(timeout), timeout=1.0)
+    )
+
+    with pytest.raises(ToolError) as raised:
+        call(slow, "list_projects")
+
+    text = str(raised.value)
+    assert "did not answer" in text
+    assert "reachable" in text
+    assert "FACET_URL" not in text
+
+
 def test_an_unreachable_api_names_the_address_it_tried(tools: MCPServer[Any]) -> None:
     """The usual cause is FACET_URL, so the message has to contain the URL."""
     unreachable = build_server(
@@ -332,8 +591,8 @@ def test_a_long_list_is_capped_and_the_answer_admits_it(
     faces = [{"tag": f"base/side[outline.c{n}]", "fingerprint": {}} for n in range(500)]
     api.on(
         "GET",
-        "/api/projects/big/topology",
-        json={"faces": faces, "edges": [], "retired": []},
+        "/api/projects/big/topologies",
+        json={"bodies": [{"id": "main", "faces": faces, "edges": [], "retired": []}]},
     )
 
     result = call(tools, "topology", project="big")
@@ -421,3 +680,13 @@ def test_the_client_points_where_facet_url_says(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.delenv("FACET_URL")
     assert FacetCADClient().base_url == "http://localhost:8000/api"
+
+
+def test_the_default_timeout_outlasts_what_the_server_may_spend() -> None:
+    """A client that gives up first turns a slow part into an unreachable server.
+
+    The kernel's own deadline is 60s and a request may wait 30s for the single
+    worker, so anything at or under that would report a working server as
+    missing.
+    """
+    assert FacetCADClient(BASE_URL)._http.timeout.read >= 90

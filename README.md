@@ -242,7 +242,11 @@ has the full set.
 
 `/recompute` returns per-feature status. A failure halts the chain, marks later features
 *skipped* rather than failed, and still returns the last good solid — so you see the part
-as far as it got, with the culprit named.
+as far as it got, with the culprit named. Two statuses describe a feature that did not
+happen while the model still reports `ok`: *suppressed*, switched off in the document, and
+*bypassed*, a blend that failed under `on_failure: skip`. Each feature also carries
+`warnings` — an option its type does not read is ignored on a rebuild rather than refused,
+and the warning is the only trace that a key is doing nothing.
 
 ## MCP server
 
@@ -309,7 +313,7 @@ cd backend && .venv/bin/pip install -e ".[mcp]"
 FACET_URL=http://localhost:8080/api .venv/bin/python -m facet.mcp
 ```
 
-Both drive the same 26 tools. The extra is optional and the API boots without it — it
+Both drive the same 37 tools. The extra is optional and the API boots without it — it
 simply serves no MCP endpoint, which is what `FACET_INSTALL=.[occt]` gets you.
 
 ### Reading the docs instead

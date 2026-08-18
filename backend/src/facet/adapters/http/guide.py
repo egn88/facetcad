@@ -24,7 +24,7 @@ paths.
 
 Base URL for everything below: `/api`. Full schema at `/openapi.json`.
 
-If your client speaks MCP, this same server exposes it at `/mcp` — 26 typed tools
+If your client speaks MCP, this same server exposes it at `/mcp` — 37 typed tools
 over everything described here, so you can skip the URL building. `GET /mcp.json`
 returns the client configuration for this deployment, addressed to whatever
 hostname you reached it at, so nothing has to be checked out or guessed.
@@ -77,6 +77,28 @@ POST /api/projects
 
 Or build it up incrementally: `POST /parameters`, `PUT /sketches/{id}`,
 `POST /features`, each of which rebuilds and reports what happened.
+
+### Changing what is already there
+
+Everything that can be added can be edited or removed, and every one of these
+rebuilds and answers with the same report:
+
+```
+PATCH  /api/projects/{id}/parameters/{name}          any part of a row, name included
+GET    /api/projects/{id}/parameters/{name}/usage    what reads it, before you touch it
+DELETE /api/projects/{id}/parameters/{name}
+DELETE /api/projects/{id}/sketches/{sketch_id}
+DELETE /api/projects/{id}/datums/{datum_id}
+DELETE /api/projects/{id}/features/{feature_id}
+PATCH  /api/projects/{id}/bodies/{body_id}           place a body; DELETE removes it
+PUT    /api/projects/{id}/document                   the whole thing, validated as a unit
+DELETE /api/projects/{id}                            the project and everything in it
+```
+
+**Renaming a parameter is safe.** `PATCH .../parameters/{name}` with a new
+`name` follows the rename through every expression in the document, so nothing
+is left reading a name that no longer exists. Renaming a *sketch curve* is not
+safe, and nothing can make it so: the curve id is inside the face name.
 
 ### Datums are computed, never picked
 
@@ -330,14 +352,45 @@ upright corners and nothing else.
 POST /api/projects/{id}/recompute
 ```
 
-returns `ok`, and per feature a `status` (`built`, `cached`, `failed`,
-`skipped`) with a structured error. **Read this after every edit.** A feature
-that failed leaves the ones after it skipped.
+returns `ok`, and per feature a `status` with a structured error. **Read this
+after every edit.**
+
+| status | what it means |
+|---|---|
+| `built` | rebuilt now |
+| `cached` | unchanged, reused from the last build |
+| `suppressed` | switched off in the document, so it did not run |
+| `failed` | it broke, and everything after it was skipped |
+| `skipped` | not attempted, because an earlier feature failed |
+| `bypassed` | it failed, but declared `on_failure: skip`, so the build carried on |
+
+Two of those describe a feature that did not happen while `ok` is still true.
+`bypassed` especially: the fillet you asked for is not on the part.
+
+Each feature also carries `warnings`. An option the type does not read lands
+there — the rebuild ignores it rather than refusing, because documents
+containing one have always built and failing them now would break working
+parts. Writing that same key through `POST /features` *is* refused, where you
+can still fix it. So a warning means: this key is doing nothing, and the part is
+not what you think it is.
+
+`?force=true` discards every cached feature first. The cache is keyed on
+content and should never be wrong, so this is a way out of a state that should
+not happen rather than part of normal use.
 
 ```
 GET /api/projects/{id}/topology    every face and edge tag that exists now
+GET /api/projects/{id}/topologies  the same, per body — see below
+GET /api/projects/{id}/state       document, bodies, topologies and sketches in one call
 GET /api/projects/{id}/mesh        triangles, if you need to reason about size
 ```
+
+**On a multi-body document, `/topology` and `/resolve` see the first body
+only.** They read the same single-solid view, so a face on the second body is
+absent rather than reported: a correct tag resolves to nothing with no error,
+which reads exactly like a typo. Use `/topologies` to see every body's tags. A
+feature declared inside a body still resolves that body's faces normally when it
+builds — this is a limitation of the two preview endpoints, not of the model.
 
 ## Getting it out
 
@@ -382,6 +435,9 @@ ones:
 | `cannot deterministically order N fragments` | two faces are coincident, usually a pad grown inside another. |
 | `produced N face(s) at a corner` | a blend meets another blend at a shared vertex. Chamfer before filleting. |
 | `duplicate feature id` | ids are unique across the document, not per body. |
+| `the geometry worker was busy` (503, `Retry-After`) | one rebuild runs at a time and yours never started. Wait and repeat it — nothing was changed. |
+| `exceeded 60s and was stopped` (503) | the operation was killed, not refused. Try something simpler; nothing was changed. |
+| `a handle from a worker that no longer exists` (409) | repeat the request verbatim. A rebuild starts from the document, so it will work. |
 
 A refusal is information. It names the feature, the selector and the reason —
 act on it rather than retrying the same call.

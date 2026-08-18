@@ -8,6 +8,7 @@ for real rather than read for plausibility.
 
 from __future__ import annotations
 
+import asyncio
 import re
 
 import pytest
@@ -57,6 +58,24 @@ def test_every_endpoint_the_guide_names_exists(client: TestClient) -> None:
         route = path.split("?")[0].rstrip(".,")
         route = route.replace("{id}", "{project_id}")
         assert route in known, f"the guide names {path}, which is not a route"
+
+
+def test_the_tool_count_the_guide_advertises_is_the_number_there_are() -> None:
+    """A client decides whether to bother with MCP on this sentence.
+
+    It is also the claim most likely to rot, because adding a tool is a change
+    in one file and the number lives in another. Counting it here is what keeps
+    "37 typed tools over everything described here" from becoming a number that
+    used to be true.
+    """
+    pytest.importorskip("mcp", reason="requires the optional MCP extra")
+    from facet.adapters.mcp.server import build_server
+
+    tools = asyncio.run(build_server().list_tools())
+    claimed = re.search(r"(\d+) typed tools", guide_markdown())
+
+    assert claimed, "the guide no longer says how many tools there are"
+    assert int(claimed.group(1)) == len(tools)
 
 
 def test_the_guide_states_the_rule_the_whole_system_rests_on() -> None:

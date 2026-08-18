@@ -36,6 +36,16 @@ from pydantic import Field
 
 DEFAULT_URL = "http://localhost:8000/api"
 
+#: How long to wait for one API call.
+#:
+#: Sized from what the server may legitimately spend, not from what feels
+#: patient: geometry runs in a child process with a 60s deadline on the call and
+#: a 30s wait for the single worker to come free, so a rebuild queued behind a
+#: slow one can honestly take a little over 90 seconds. A 60s client timeout
+#: turned that into "cannot reach the API", which sends an agent to check a URL
+#: that was never wrong. ``FACET_TIMEOUT`` overrides it.
+DEFAULT_TIMEOUT = float(os.environ.get("FACET_TIMEOUT", "120"))
+
 #: How many entries any list-shaped answer may carry. A topology of a few
 #: thousand faces is ordinary and would evict everything else from an agent's
 #: context; the first couple of hundred tags plus an honest count is what
@@ -70,6 +80,16 @@ Guessing a tag is the one way to waste a turn here.
 
 `set_parameters` is the point of the system: change a number and the whole
 model rebuilds, with per-feature results telling you whether it still builds.
+Read the report: `warnings` names an option a feature type ignored, and a
+`bypassed` feature is one that failed and was allowed to.
+
+A document may hold several bodies, each with its own history and each exported
+separately. Ask `topology` for a named body's tags — selectors are resolved
+against the first body only, so a tag from another one is invisible to
+`resolve_selector`.
+
+`guide` returns the full manual — selector syntax, a worked two-part enclosure,
+and the mistakes that cost a rebuild — for when this is all you have been given.
 """
 
 
@@ -90,10 +110,14 @@ class FacetCADClient:
         base_url: str | None = None,
         *,
         transport: httpx.BaseTransport | None = None,
-        timeout: float = 60.0,
+        timeout: float | None = None,
     ) -> None:
         self.base_url = (base_url or os.environ.get("FACET_URL", DEFAULT_URL)).rstrip("/")
-        self._http = httpx.Client(base_url=self.base_url, transport=transport, timeout=timeout)
+        self._http = httpx.Client(
+            base_url=self.base_url,
+            transport=transport,
+            timeout=DEFAULT_TIMEOUT if timeout is None else timeout,
+        )
 
     def request(
         self,
@@ -107,6 +131,17 @@ class FacetCADClient:
             response = self._http.request(
                 method, path, params=_clean(params), json=json
             )
+        except httpx.TimeoutException as error:
+            # Distinct from unreachable, because the remedy is the opposite one.
+            # The server is there and is working; something in the model is
+            # taking longer than a client is willing to wait, and the document
+            # is unchanged either way.
+            raise ToolError(
+                f"the FacetCAD API at {self.base_url} did not answer within "
+                f"{self._http.timeout.read}s: {error}. The server is reachable, so "
+                "this is a slow rebuild rather than a bad address — try again, "
+                "or simplify what is being built. Nothing was changed."
+            ) from error
         except httpx.RequestError as error:
             # Naming the URL matters more than naming the exception: the usual
             # cause is that FACET_URL points somewhere the container is not.
@@ -158,9 +193,20 @@ def _diagnostic(response: httpx.Response) -> str:
         detail = response.json().get("detail")
     except ValueError:
         detail = None
-    return _detail_text(detail) or (
+    text = _detail_text(detail) or (
         f"the API refused the request with status {response.status_code}"
     )
+    # Geometry runs in a child process with one worker, so a request can be
+    # turned away because the worker was busy rather than because anything is
+    # wrong with it. The server says so with Retry-After; without repeating that
+    # here an agent reads "refused" and starts editing a model that is fine.
+    retry_after = response.headers.get("retry-after")
+    if retry_after:
+        text += (
+            f"\n  this one is worth retrying in about {retry_after}s — "
+            "the request never ran, and nothing was changed"
+        )
+    return text
 
 
 def _detail_text(detail: object) -> str:
@@ -239,10 +285,18 @@ def _build_report(result: Mapping[str, Any]) -> dict[str, Any]:
     An agent that just changed a number needs three things from that: did it
     build, which feature failed, and what the dependent parameters became. The
     rest is available from ``get_document`` when it is actually wanted.
+
+    Warnings are the exception to "keep it short". A rebuild reports an option
+    the feature type does not read as a warning rather than refusing — an
+    existing document containing one has always built, and failing it now would
+    break working parts — so the warning is the only trace that a key is being
+    ignored. Dropping it here would restore exactly the silence it was added to
+    end.
     """
     notes: list[str] = []
 
     features: list[dict[str, Any]] = []
+    warnings: list[str] = []
     for outcome in _cap(_rows(result.get("features")), "features", notes):
         if not isinstance(outcome, Mapping):
             continue
@@ -254,6 +308,10 @@ def _build_report(result: Mapping[str, Any]) -> dict[str, Any]:
         error = _error_summary(outcome.get("error"))
         if error:
             row["error"] = error
+        said = [str(note) for note in _rows(outcome.get("warnings"))]
+        if said:
+            row["warnings"] = said
+            warnings.extend(f"{outcome.get('id')}: {note}" for note in said)
         features.append(row)
 
     bodies = [
@@ -272,10 +330,21 @@ def _build_report(result: Mapping[str, Any]) -> dict[str, Any]:
     report: dict[str, Any] = {
         "ok": bool(result.get("ok")),
         "features": features,
-        "failures": [f for f in features if "error" in f],
+        # Only the ones that actually stopped the build. A blend carrying
+        # `on_failure: skip` also arrives with an error attached, and calling
+        # that a failure would have every such model read as broken.
+        "failures": [f for f in features if f.get("status") == "failed"],
         "parameters": resolved,
         "bodies": _cap(bodies, "bodies", notes),
     }
+    # A feature that did not happen while `ok` stayed true is the quiet kind of
+    # wrong this project exists to avoid, so it is stated rather than left to be
+    # noticed in the feature list.
+    bypassed = [f for f in features if f.get("status") == "bypassed"]
+    if bypassed:
+        report["bypassed"] = bypassed
+    if warnings:
+        report["warnings"] = _cap(warnings, "warnings", notes)
     if result.get("lastGoodFeature"):
         report["lastGoodFeature"] = result["lastGoodFeature"]
     error = _error_summary(result.get("error"))
@@ -412,6 +481,23 @@ def expression_help() -> dict[str, Any]:
     return dict(client().json("GET", "/expressions"))
 
 
+@server.tool()
+def guide() -> dict[str, Any]:
+    """The whole manual for this system, as Markdown — read it once, up front.
+
+    Written for a model that has been handed these tools and nothing else: the
+    document's five parts in dependency order, selector syntax, a worked
+    two-part enclosure that builds as written, a pattern for each thing you are
+    likely to be asked for, and a table of the refusals you will meet with what
+    each one means.
+
+    It costs a few thousand tokens, which is less than one avoidable rebuild.
+    Worth it at the start of any session that will do more than read.
+    """
+    response = client().request("GET", "/mcp")
+    return {"guide": response.text, "url": client().url_for("/mcp")}
+
+
 # --------------------------------------------------------------------------
 # Building
 # --------------------------------------------------------------------------
@@ -437,6 +523,52 @@ def create_project(
             "POST",
             "/projects",
             json={"id": project, "name": name, "document": document},
+        )
+    )
+
+
+@server.tool()
+def delete_project(
+    project: Annotated[str, Field(description="Project id; the whole document goes")],
+) -> dict[str, Any]:
+    """Delete a project and everything in it.
+
+    There is no undo and no trash: the document is the model, and removing it
+    removes the parameters, the sketches and the history with it. Read
+    `list_projects` first if the id came from anywhere but this session.
+    """
+    client().request("DELETE", _project(project))
+    return {"deleted": project}
+
+
+@server.tool()
+def replace_document(
+    project: Project,
+    document: Annotated[
+        dict[str, Any] | None,
+        Field(description="A whole document, in the shape `get_document` returns"),
+    ] = None,
+    yaml: Annotated[
+        str | None, Field(description="The same thing as YAML text, as stored on disk")
+    ] = None,
+) -> dict[str, Any]:
+    """Replace a project's entire document in one call, then rebuild.
+
+    Give either `document` or `yaml`. This is the tool for a change too broad to
+    express as a series of edits — re-deriving a sheet of parameters at once,
+    or copying a model onto another server — and for editing a document you have
+    read as YAML.
+
+    It is validated as a unit and applied whole or not at all, so a document
+    that does not parse leaves the existing one untouched. What it is *not* is a
+    substitute for the editing tools: rewriting a whole document to change one
+    number loses the feature-by-feature verdict that says which edit broke what.
+    """
+    return dict(
+        client().json(
+            "PUT",
+            _project(project) + "/document",
+            json={"document": document, "yaml": yaml},
         )
     )
 
@@ -521,6 +653,105 @@ def set_parameters(
 
 
 @server.tool()
+def edit_parameter(
+    project: Project,
+    parameter: Annotated[str, Field(description="The row to change, by its current name")],
+    name: Annotated[
+        str | None, Field(description="A new name; renames it everywhere it is read")
+    ] = None,
+    value: Annotated[float | None, Field(description="A new literal number")] = None,
+    expr: Annotated[str | None, Field(description="A new expression")] = None,
+    unit: str | None = None,
+    group: Annotated[str | None, Field(description="Sheet section this row belongs to")] = None,
+    doc: Annotated[str | None, Field(description="What this dimension means")] = None,
+) -> dict[str, Any]:
+    """Change any part of one parameter row — including its name — and rebuild.
+
+    A rename is followed through every expression in the document, so nothing is
+    left reading a name that no longer exists. That is what makes renaming
+    `w` to `plate_w` a safe thing to do rather than a search and replace across
+    a model you cannot see all of.
+
+    Only what you pass is changed. To swap a literal for a derived value, give
+    `expr`; `set_parameters` is the shorter route when the value is all that
+    changes.
+    """
+    return _build_report(
+        client().json(
+            "PATCH",
+            f"{_project(project)}/parameters/{parameter}",
+            json={
+                "name": name,
+                "value": value,
+                "expr": expr,
+                "unit": unit,
+                "group": group,
+                "doc": doc,
+            },
+        )
+    )
+
+
+@server.tool()
+def parameter_usage(
+    project: Project,
+    parameter: Annotated[str, Field(description="The parameter to trace")],
+) -> dict[str, Any]:
+    """Everything that reads a parameter — other expressions, datums, sketches, features.
+
+    The question to ask before deleting or repurposing a row. A parameter that
+    nothing reads is safe to remove; one that six dimensions depend on is a
+    decision, and this is what turns that into a fact rather than a guess.
+    """
+    return dict(client().json("GET", f"{_project(project)}/parameters/{parameter}/usage"))
+
+
+@server.tool()
+def delete_parameter(
+    project: Project,
+    parameter: Annotated[str, Field(description="The row to remove")],
+) -> dict[str, Any]:
+    """Remove a parameter row and rebuild.
+
+    Refused outright while anything still reads it, naming every reader — a
+    document is not allowed to pass through a state where an expression points
+    at a name that is gone. So this succeeds only on a row nothing depends on;
+    `parameter_usage` tells you which case you are in before you spend the call.
+
+    To retire a parameter that is still in use, change its readers first, or
+    rename it into the one you are keeping with `edit_parameter`.
+    """
+    return _build_report(
+        client().json("DELETE", f"{_project(project)}/parameters/{parameter}")
+    )
+
+
+@server.tool()
+def import_parameters(
+    project: Project,
+    csv: Annotated[
+        str,
+        Field(description="The file contents, as exported by `export` with fmt='csv'"),
+    ],
+) -> dict[str, Any]:
+    """Replace the parameter sheet from a CSV, then rebuild.
+
+    The other half of `export(fmt='csv')`: the sheet goes out to a spreadsheet,
+    comes back edited, and lands as a whole table in one rebuild.
+
+    Only parameters are touched — datums, sketches and the feature history are
+    left alone, so a round trip cannot damage what a spreadsheet has no way to
+    represent. A bad file is rejected whole, naming the row; nothing is
+    half-applied.
+    """
+    return _build_report(
+        client().json(
+            "POST", _project(project) + "/import", json={"format": "csv", "body": csv}
+        )
+    )
+
+
+@server.tool()
 def put_sketch(
     project: Project,
     sketch: Annotated[str, Field(description="Sketch id; replaces any sketch of that id")],
@@ -578,6 +809,22 @@ def put_sketch(
 
 
 @server.tool()
+def delete_sketch(
+    project: Project,
+    sketch: Annotated[str, Field(description="Id of the sketch to remove")],
+) -> dict[str, Any]:
+    """Remove a sketch and rebuild.
+
+    Refused while any feature still draws its profile from one of the sketch's
+    loops or places itself at one of its points, naming them. Delete those
+    features first if that is what you meant — the refusal is the system saying
+    the sketch is still load bearing, which is cheaper to hear now than as a
+    build that stopped.
+    """
+    return _build_report(client().json("DELETE", f"{_project(project)}/sketches/{sketch}"))
+
+
+@server.tool()
 def put_datum(
     project: Project,
     datum: Annotated[str, Field(description="Datum id; replaces any datum of that id")],
@@ -619,6 +866,20 @@ def put_datum(
             },
         )
     )
+
+
+@server.tool()
+def delete_datum(
+    project: Project,
+    datum: Annotated[str, Field(description="Id of the datum to remove")],
+) -> dict[str, Any]:
+    """Remove a datum plane and rebuild.
+
+    Refused while a sketch still lies on it or another datum declares it as
+    `parent`, naming them: deleting a plane out from under a sketch is not made
+    safe by doing it quietly. Move the sketch to another datum first.
+    """
+    return _build_report(client().json("DELETE", f"{_project(project)}/datums/{datum}"))
 
 
 @server.tool()
@@ -749,13 +1010,72 @@ def add_body(
     )
 
 
+@server.tool()
+def move_body(
+    project: Project,
+    body: Annotated[str, Field(description="Id of the body to place")],
+    origin: Annotated[
+        list[float | str] | None,
+        Field(description="[x, y, z]; expressions allowed, e.g. ['outer_w + 10', 0, 0]"),
+    ] = None,
+    rotation: Annotated[
+        list[float | str] | None, Field(description="[rx, ry, rz] in degrees")
+    ] = None,
+) -> dict[str, Any]:
+    """Set where a body sits, and rebuild.
+
+    Placement is for display and export layout only; it never reaches the
+    modelled geometry. Moving a part beside another to look at the assembly
+    cannot perturb one face name, one fingerprint or one selector — which is
+    what makes it a free operation rather than a rebuild of the part.
+
+    Both arguments replace what is there, so pass both to change both.
+    """
+    return _build_report(
+        client().json(
+            "PATCH",
+            f"{_project(project)}/bodies/{body}",
+            json={
+                "id": body,
+                "origin": origin if origin is not None else [0, 0, 0],
+                "rotation": rotation if rotation is not None else [0, 0, 0],
+            },
+        )
+    )
+
+
+@server.tool()
+def delete_body(
+    project: Project,
+    body: Annotated[str, Field(description="Id of the body to remove")],
+) -> dict[str, Any]:
+    """Remove a body and its whole feature history, then rebuild.
+
+    Bodies are independent, so the others are unaffected — this is the one
+    delete in the document that cannot break something elsewhere. What goes
+    with it is every feature declared in it and every face those features named.
+    """
+    return _build_report(client().json("DELETE", f"{_project(project)}/bodies/{body}"))
+
+
 # --------------------------------------------------------------------------
 # Understanding the model
 # --------------------------------------------------------------------------
 
 
 @server.tool()
-def recompute(project: Project) -> dict[str, Any]:
+def recompute(
+    project: Project,
+    force: Annotated[
+        bool,
+        Field(
+            description=(
+                "Throw away every cached feature and rebuild the history from "
+                "scratch. Slow, and normally unnecessary."
+            )
+        ),
+    ] = False,
+) -> dict[str, Any]:
     """Rebuild the model and report what each feature did.
 
     Use it to check the state of a project you did not just edit, or after
@@ -766,18 +1086,77 @@ def recompute(project: Project) -> dict[str, Any]:
     A feature that fails halts the chain: the ones after it come back *skipped*,
     `lastGoodFeature` says how far the build got, and the last good solid is
     kept — so you can see the part as far as it built, with the culprit named.
+
+    Each feature's `status` is one of:
+
+    * `built` — rebuilt now
+    * `cached` — unchanged, reused from the last build
+    * `suppressed` — switched off in the document, so it did not run
+    * `failed` — it broke, and everything after it was skipped
+    * `skipped` — not attempted, because an earlier feature failed
+    * `bypassed` — it failed, but declared `on_failure: skip`, so the build
+      carried on without it. Reported rather than swallowed: a fillet that
+      silently did not happen is the quiet wrongness this system exists to
+      avoid.
+
+    `force` exists for a state that should not happen. The cache is keyed on
+    content, so a stale entry is a bug rather than a thing to work around: reach
+    for it when geometry disagrees with the document, not as a habit.
     """
-    return _build_report(client().json("POST", _project(project) + "/recompute"))
+    return _build_report(
+        client().json(
+            "POST",
+            _project(project) + "/recompute",
+            params={"force": "true"} if force else None,
+        )
+    )
+
+
+def _tags(index: Mapping[str, Any], notes: list[str], where: str = "") -> dict[str, Any]:
+    """One solid's named geometry, as the tags and nothing else."""
+    prefix = f"{where} " if where else ""
+    faces = [str(entry.get("tag")) for entry in _rows(index.get("faces"))]
+    edges = [str(entry.get("tag")) for entry in _rows(index.get("edges"))]
+    retired = [
+        {
+            "tag": str(entry.get("tag")),
+            "reason": entry.get("reason"),
+            "retiredBy": entry.get("retired_by"),
+        }
+        for entry in _rows(index.get("retired"))
+    ]
+    return {
+        "faces": _cap(faces, f"{prefix}faces", notes),
+        "edges": _cap(edges, f"{prefix}edges", notes),
+        "retired": _cap(retired, f"{prefix}retired", notes),
+        "counts": {"faces": len(faces), "edges": len(edges), "retired": len(retired)},
+    }
+
+
+def _bodies_of(project: str) -> list[Mapping[str, Any]]:
+    """Every body's named geometry, keyed by body id."""
+    payload = client().json("GET", _project(project) + "/topologies")
+    return [body for body in _rows(payload.get("bodies")) if isinstance(body, Mapping)]
 
 
 @server.tool()
-def topology(project: Project) -> dict[str, Any]:
+def topology(
+    project: Project,
+    body: Annotated[
+        str | None,
+        Field(description="One body's tags only; every body when omitted"),
+    ] = None,
+) -> dict[str, Any]:
     """Every face and edge tag the model currently has — the vocabulary of selectors.
 
     Read this before writing any selector. A tag is a provenance path, not an
     index: `base/side[outline.left]` is the face swept from curve `left` of
     sketch `outline` by feature `base`, and it keeps that name across parameter
     changes.
+
+    A document with more than one body answers per body, because a tag tells you
+    what a face is but not which part it is on — and that is what you need for
+    `export(body=...)`. A single-body document answers flat.
 
     `retired` lists tags that existed in an earlier state and no longer do, with
     the reason and the feature that consumed them. When a selector has just
@@ -788,25 +1167,32 @@ def topology(project: Project) -> dict[str, Any]:
     of no use to a caller.
     """
     notes: list[str] = []
-    body = client().json("GET", _project(project) + "/topology")
+    bodies = _bodies_of(project)
 
-    faces = [str(entry.get("tag")) for entry in _rows(body.get("faces"))]
-    edges = [str(entry.get("tag")) for entry in _rows(body.get("edges"))]
-    retired = [
-        {
-            "tag": str(entry.get("tag")),
-            "reason": entry.get("reason"),
-            "retiredBy": entry.get("retired_by"),
-        }
-        for entry in _rows(body.get("retired"))
+    if body is not None:
+        named = next((b for b in bodies if str(b.get("id")) == body), None)
+        if named is None:
+            raise ToolError(
+                f"no body '{body}' in project '{project}'. It has: "
+                + (", ".join(str(b.get("id")) for b in bodies) or "no bodies")
+            )
+        return _with_notes({"body": body, **_tags(named, notes)}, notes)
+
+    if len(bodies) <= 1:
+        index = bodies[0] if bodies else {}
+        return _with_notes(_tags(index, notes), notes)
+
+    per_body = [
+        {"id": str(entry.get("id")), **_tags(entry, notes, where=str(entry.get("id")))}
+        for entry in bodies
     ]
-
     return _with_notes(
         {
-            "faces": _cap(faces, "faces", notes),
-            "edges": _cap(edges, "edges", notes),
-            "retired": _cap(retired, "retired", notes),
-            "counts": {"faces": len(faces), "edges": len(edges), "retired": len(retired)},
+            "bodies": per_body,
+            "counts": {
+                key: sum(int(b["counts"][key]) for b in per_body)
+                for key in ("faces", "edges", "retired")
+            },
         },
         notes,
     )
@@ -836,6 +1222,12 @@ def resolve_selector(
 
     `ok` is false when the selector matched nothing, with `error` explaining
     why. Nothing is changed either way.
+
+    **Resolution runs against the first body only.** In a multi-body document a
+    tag belonging to any other body matches nothing here even though the face
+    exists, so a `count` of zero on a tag you read from `topology` is worth
+    checking against `note` before you go looking for the mistake in the
+    selector.
     """
     payload: dict[str, Any] = {"kind": kind}
     if between is not None:
@@ -846,15 +1238,59 @@ def resolve_selector(
     notes: list[str] = []
     body = client().json("POST", _project(project) + "/resolve", json=payload)
     matched = [str(tag) for tag in _rows(body.get("matched"))]
-    return _with_notes(
+    answer: dict[str, Any] = {
+        "selector": body.get("selector"),
+        "ok": body.get("ok"),
+        "count": body.get("count", len(matched)),
+        "matched": _cap(matched, "matched", notes),
+        "error": body.get("error"),
+    }
+    if not matched:
+        hint = _other_body(project, selector, between)
+        if hint:
+            answer["note"] = hint
+    return _with_notes(answer, notes)
+
+
+def _other_body(
+    project: str, selector: str | None, between: Sequence[str] | None
+) -> str | None:
+    """Whether the tags that did not match exist on some other body.
+
+    "Resolved nothing" and "resolved nothing *here*" send an agent to opposite
+    places, and the API cannot tell them apart: it resolves against the first
+    body, and a face on the second is simply absent. Rather than let a correct
+    tag read as a typo, this looks — only on the failure path, where a second
+    request is cheap next to the rebuild it saves.
+    """
+    wanted = [text for text in ([selector] if selector else list(between or [])) if text]
+    if not wanted:
+        return None
+    try:
+        bodies = _bodies_of(project)
+    except ToolError:  # pragma: no cover - a hint is never worth failing over
+        return None
+    if len(bodies) <= 1:
+        return None
+
+    first = str(bodies[0].get("id"))
+    stems = {text.split("/")[0].strip() for text in wanted if "*" not in text.split("/")[0]}
+    elsewhere = sorted(
         {
-            "selector": body.get("selector"),
-            "ok": body.get("ok"),
-            "count": body.get("count", len(matched)),
-            "matched": _cap(matched, "matched", notes),
-            "error": body.get("error"),
-        },
-        notes,
+            str(entry.get("id"))
+            for entry in bodies[1:]
+            for face in _rows(entry.get("faces"))
+            if str(face.get("tag")).split("/")[0] in stems
+        }
+    )
+    if not elsewhere:
+        return None
+    return (
+        f"those faces are on body {', '.join(repr(name) for name in elsewhere)}, and "
+        f"selectors here are resolved against the first body ({first!r}) only — the "
+        "tag is right, the resolver cannot see it. Use topology(body=...) to read "
+        "that body's tags; a feature declared inside that body still resolves them "
+        "normally when it builds."
     )
 
 
