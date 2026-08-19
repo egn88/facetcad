@@ -132,6 +132,12 @@ class BodyResult:
     #: by its source, so the quantities across a document sum to the piece
     #: count instead of double-counting it.
     copies: tuple[str, ...] = ()
+    #: True and worth knowing about a body that did not fail. A body with no
+    #: features is the one that matters: it is legitimate for the moment
+    #: between creating a body and putting something in it, and a silent defect
+    #: if it survives past that, because everything downstream then reports it
+    #: as a body that would not build rather than one with nothing in it.
+    warnings: tuple[str, ...] = ()
     #: The content key of the state ``solid`` is actually in — the key of the
     #: deepest feature that built, which on a history that stopped early is the
     #: last good one rather than the last declared one.
@@ -175,6 +181,8 @@ class BodyResult:
             "of": self.of,
             "copies": list(self.copies),
             "quantity": self.quantity,
+            "warnings": list(self.warnings),
+            "empty": self.solid is None and self.error is None,
         }
 
 
@@ -237,9 +245,16 @@ class RecomputeResult:
         The piece count for a print run: bodies that build themselves, each with
         the number of times it appears. Copies do not get their own row — they
         are the count on the row of the body they copy.
+
+        A body that produced no solid is not on the list at all. Whatever it was
+        going to be, it is not a thing anyone can make yet, and counting it
+        would put an unmakeable row in the one place whose whole job is to say
+        what to make. Why it is missing is on the body, as a warning or an error.
         """
         return tuple(
-            (body.id, body.quantity) for body in self.bodies if not body.is_copy
+            (body.id, body.quantity)
+            for body in self.bodies
+            if not body.is_copy and body.solid is not None
         )
 
     @property
@@ -250,6 +265,17 @@ class RecomputeResult:
     def failures(self) -> tuple[FeatureOutcome, ...]:
         return tuple(o for o in self.outcomes if o.status == FeatureStatus.FAILED)
 
+    @property
+    def warnings(self) -> tuple[str, ...]:
+        """Everything true and worth knowing that is not a failure.
+
+        Per-body notes, chiefly "this body is empty". A build that is `ok` and
+        silent about an empty body is the shape of the bug this exists to
+        prevent: nothing anywhere said so, and the first news of it was an
+        export refusing with a message about a body that would not build.
+        """
+        return tuple(note for body in self.bodies for note in body.warnings)
+
     def to_dict(self) -> dict[str, object]:
         return {
             "ok": self.ok,
@@ -258,6 +284,7 @@ class RecomputeResult:
             "features": [o.to_dict() for o in self.outcomes],
             "parameters": self.parameters.as_dict() if self.parameters else {},
             "parts": [{"body": name, "quantity": n} for name, n in self.parts],
+            "warnings": list(self.warnings),
             "lastGoodFeature": self.last_good_feature,
             "error": self.error.as_dict() if self.error else None,
         }
@@ -600,6 +627,7 @@ class RecomputeEngine:
             outcomes=tuple(outcomes),
             placement=placement,
             key=upstream_key or None,
+            warnings=_built_nothing(body.id, current, outcomes),
         )
 
     # -- snapshots ---------------------------------------------------------
@@ -946,6 +974,37 @@ class RecomputeEngine:
         return hashlib.sha256(blob).hexdigest()
 
 
+def _built_nothing(
+    body_id: str, solid: NamedSolid | None, outcomes: Sequence[FeatureOutcome]
+) -> tuple[str, ...]:
+    """Say so when a body that did not fail also produced no solid.
+
+    A body with no features passes every check there is: nothing was asked for,
+    so nothing went wrong. It then behaves exactly like a body that failed
+    everywhere downstream — no mesh, no faces, no export — and the messages
+    there talk about a body that would not build, which sends the reader to
+    debug a feature that does not exist.
+
+    Not an error, because it is the correct state for the moment between
+    creating a body and putting the first pad in it. Said out loud, because
+    that moment lasting is a defect nobody would otherwise be told about.
+    """
+    if solid is not None:
+        return ()
+    if any(o.status == FeatureStatus.FAILED for o in outcomes):
+        return ()  # the failure is the story; this would only add noise
+    if not outcomes:
+        return (
+            f"body {body_id!r} has no features, so it builds nothing. It will not "
+            "appear in the viewport and cannot be exported. Add a feature to it, or "
+            "delete the body.",
+        )
+    return (
+        f"body {body_id!r} builds nothing: every feature in it is suppressed. "
+        "Unsuppress one, or delete the body.",
+    )
+
+
 def _as_copy(body: Body, source: BodyResult | None, placement: Frame) -> BodyResult:
     """One body's solid, appearing again under another id and placement.
 
@@ -979,6 +1038,14 @@ def _as_copy(body: Body, source: BodyResult | None, placement: Frame) -> BodyRes
         placement=placement,
         key=source.key,
         error=source.error or _source_unfinished(body, source),
+        warnings=(
+            ()
+            if source.solid is not None or source.error is not None
+            else (
+                f"body {body.id!r} copies {source.id!r}, which builds nothing, so this "
+                "shows nothing either. Fix it there and every copy is fixed with it.",
+            )
+        ),
     )
 
 

@@ -116,7 +116,7 @@ exactly, in pure Python. It exists for three reasons:
 1. **It proves the port is real.** A port with one implementation is a guess. Two force
    the abstraction to be honest, and any leak of OCCT concepts into `application` shows up
    immediately as a compile-time hole in the fake.
-2. **Test speed.** With OCCT absent entirely, 809 of the 1112 backend tests still run — the
+2. **Test speed.** With OCCT absent entirely, 829 of the 1132 backend tests still run — the
    naming, selector, recompute and snapshot suites, which are the ones that fail first when
    the tag algebra is wrong — and they finish in about fifteen seconds against the eighty-five
    the full suite takes. The parameter sweeps are among the 303 that drop

@@ -95,6 +95,8 @@ export interface BuildResult {
   parameters: Record<string, number>;
   /** Each distinct part and how many of it the model calls for. */
   parts: PartCount[];
+  /** Per-body notes that are not failures, chiefly empty bodies. */
+  warnings: string[];
   lastGoodFeature: string | null;
   error: DomainError | null;
 }
@@ -202,6 +204,11 @@ export interface BodyOutcome {
   /** How many pieces of this body the model calls for; 0 on a copy, which its
    * source counts, so the quantities sum to the piece count. */
   quantity: number;
+  /** True and worth knowing about a body that did not fail — chiefly that it
+   * is empty, which is legitimate mid-edit and a defect if it survives. */
+  warnings: string[];
+  /** Built nothing, without failing: no features, or all of them suppressed. */
+  empty: boolean;
 }
 
 export interface MeshPayload {

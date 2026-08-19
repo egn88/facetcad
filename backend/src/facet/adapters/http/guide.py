@@ -322,6 +322,23 @@ Read what it teaches:
 5. **Each body's features are its own.** A second pad in the same body fuses
    onto what is there.
 
+### Never leave a body empty
+
+A body with no features builds nothing. It is not an error — it is the correct
+state for the moment between `add_body` and the first `add_feature` — but if it
+survives past that it behaves like a body that failed: no geometry, no faces,
+and nothing to export.
+
+Every build report says so, in `warnings` and as `empty: true` on the body:
+
+```
+warnings: ["body 'stay_r' has no features, so it builds nothing. ..."]
+bodies:   [{"id": "stay_r", "ok": true, "faceCount": 0, "empty": true}, ...]
+```
+
+Create a body and fill it in the same breath. If you are checking a report and
+see `empty`, that body is not finished.
+
 ## A part that appears more than once
 
 Do not build it twice. A body that repeats — four legs, six brackets, a row of
@@ -510,6 +527,7 @@ ones:
 | `expected 4, resolved 6` | the model changed shape under a selector. Narrow it, or accept the new count. |
 | `the pocket removes no material` | almost always `direction`. The sketch is on the far side of the material. |
 | `is a copy of X, so it cannot hold features` | add the feature to X; every copy of it gets the feature. |
+| `has no features, so it builds nothing` | an empty body. Add a feature to it, or delete it — it is not a build failure. |
 | `is copied by ...` | delete the copies before the body they copy, or they lose their geometry. |
 | `cannot deterministically order N fragments` | two faces are coincident, usually a pad grown inside another. |
 | `produced N face(s) at a corner` | a blend meets another blend at a shared vertex. Chamfer before filleting. |

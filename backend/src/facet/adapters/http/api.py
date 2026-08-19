@@ -24,7 +24,7 @@ from facet.adapters.export.sheet_import import parameters_from_csv
 from facet.adapters.http.guide import guide_markdown
 from facet.adapters.persistence.filesystem import document_from_yaml, yaml_text
 from facet.application.ports.repository import ProjectExists, ProjectNotFound
-from facet.application.recompute import Detail
+from facet.application.recompute import Detail, RecomputeResult
 from facet.application.services import ProjectService
 
 # Aliased: FastAPI exports a `Body` of its own for request payloads.
@@ -847,11 +847,13 @@ def export(
             # a thread declared 'export' is cut here even though the viewport
             # skipped it.
             tessellation, result = api.mesh(project_id, detail=Detail.FULL, body=body)
-            if result.solid is None:
-                raise HTTPException(
-                    status_code=422,
-                    detail={"message": "the model does not build, so it cannot be exported"},
-                )
+            # Guarded on the triangles actually produced, not on `result.solid`
+            # — which reads through to the *first* body and so answered for the
+            # wrong one. A single empty body at the top of a document made every
+            # export fail, including one that named a body which had built
+            # perfectly well, and said the model did not build when it had.
+            if not tessellation.positions:
+                raise HTTPException(status_code=422, detail={"message": _nothing_built(result)})
             content = _mesh_bytes(fmt, tessellation, document.name)
             stem = f"{project_id}-{body}" if body else project_id
             return Response(
@@ -1125,6 +1127,23 @@ def export_enclosure(
             )
         },
     )
+
+
+def _nothing_built(result: RecomputeResult) -> str:
+    """Why an export produced no triangles, in the words of the actual cause."""
+    if result.error is not None:
+        return f"the model does not build, so it cannot be exported: {result.error}"
+    if result.failures():
+        named = ", ".join(o.id for o in result.failures())
+        return (
+            f"the model does not build, so it cannot be exported: {named} failed. "
+            "See the build report."
+        )
+    if result.warnings:
+        # Every body is empty. It builds; there is simply nothing in it, and
+        # saying it does not build sends the reader to look for a broken feature.
+        return "; ".join(result.warnings)
+    return "this model has no geometry to export."
 
 
 def _mesh_bytes(fmt: str, tessellation, name: str) -> bytes:

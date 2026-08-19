@@ -303,6 +303,12 @@ checking, and it used to hand back a row count and a timestamp.
 Bodies, sketches and datums are edited through endpoints of the same shape; `/openapi.json`
 has the full set.
 
+An **empty body** — one with no features — builds nothing, and every build report
+says so in `warnings` and as `empty: true` on the body. It is not a failure: it is
+what a body is between being created and being filled. It used to pass in complete
+silence and then surface as an export refusing with a message about a model that
+"does not build".
+
 `/recompute` returns per-feature status. A failure halts the chain, marks later features
 *skipped* rather than failed, and still returns the last good solid — so you see the part
 as far as it got, with the culprit named. Two statuses describe a feature that did not
@@ -419,11 +425,11 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) and [DESIGN.md](DESIGN.md).
 ## Tests
 
 ```bash
-cd backend && .venv/bin/python -m pytest        # 1112 tests, ~85 s with OCCT installed
+cd backend && .venv/bin/python -m pytest        # 1132 tests, ~87 s with OCCT installed
 cd frontend && npm test                        # 25 tests, chain naming stability
 ```
 
-Without the OCCT extra, 303 of those drop out and the remaining 809 — naming, selectors,
+Without the OCCT extra, 303 of those drop out and the remaining 829 — naming, selectors,
 recompute, the whole domain — run on the analytic kernel in about fifteen seconds.
 
 The conformance suite runs twice — once per kernel — so OCCT and the analytic kernel are

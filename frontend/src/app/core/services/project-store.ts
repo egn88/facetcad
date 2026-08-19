@@ -258,6 +258,15 @@ export class ProjectStore {
         views.push({ headline: `${outcome.id} — ignored`, message: warning, reasons: [] });
       }
     }
+    // Per-body notes, of which "this body is empty" is the one that matters. It
+    // is not a failure — it is the correct state for the moment between
+    // creating a body and putting something in it — but nothing said so before,
+    // and the first news of it was an export refusing.
+    for (const body of build.bodies ?? []) {
+      for (const warning of body.warnings ?? []) {
+        views.push({ headline: `${body.id} — empty`, message: warning, reasons: [] });
+      }
+    }
     return views;
   });
 
@@ -399,7 +408,12 @@ export class ProjectStore {
     // Distinct parts, not placements: exporting a copy would hand back the same
     // solid under a second name, and the number to print is the quantity rather
     // than a row per piece.
-    const bodies = this.editableBodyIds();
+    // Bodies with geometry only. Offering an empty one gives a menu entry whose
+    // only possible outcome is a refusal.
+    const empty = new Set(
+      (this.build()?.bodies ?? []).filter((b) => b.empty).map((b) => b.id),
+    );
+    const bodies = this.editableBodyIds().filter((id) => !empty.has(id));
     const quantities = this.bodyQuantities();
     const formats = (body?: string) => ({
       stl: this.api.exportUrl(id, 'stl', body),

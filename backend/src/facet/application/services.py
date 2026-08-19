@@ -469,15 +469,33 @@ class ProjectService:
             if entry.solid is not None and (body is None or entry.id == body)
         ]
         if body is not None and not found:
-            built = [entry.id for entry in result.bodies if entry.solid is not None]
-            raise DocumentError(
-                reason=(
-                    f"no body named {body!r} built"
-                    + (f"; this document builds {', '.join(built)}" if built else "")
-                ),
-                path="bodies",
-            )
+            raise self._nothing_to_export(result, body)
         return found
+
+    def _nothing_to_export(self, result: RecomputeResult, body: str) -> DocumentError:
+        """Why a named body has no geometry — which is rarely a wrong name.
+
+        It used to be one message, "no body named X built", for three different
+        situations, and it was wrong about two of them. A body that exists and is
+        empty is not a body that would not build, and telling someone it is sends
+        them to debug a feature that was never there.
+        """
+        named = next((e for e in result.bodies if e.id == body), None)
+        if named is None:
+            names = ", ".join(e.id for e in result.bodies) or "no bodies"
+            return DocumentError(
+                reason=f"no body named {body!r}; this document has {names}", path="bodies"
+            )
+        if named.warnings:
+            # It exists, it did not fail, and it produced nothing — say which.
+            return DocumentError(reason=named.warnings[0], path="bodies")
+        return DocumentError(
+            reason=(
+                f"body {body!r} did not build, so there is nothing to export. "
+                + (str(named.error) if named.error else "See the build report.")
+            ),
+            path="bodies",
+        )
 
     def body_meshes(self, project_id: str) -> tuple[list[dict[str, object]], RecomputeResult]:
         """Every body, tessellated in its own coordinates with its placement.
@@ -590,13 +608,21 @@ class ProjectService:
 
         for body in result.bodies:
             if body.solid is None:
+                # Through `_coordinates`, exactly like a body that has geometry.
+                # Hand-written empty arrays omitted the `encoding` key that the
+                # packed shape declares, and a client that checks it — as it
+                # must, or it would read the wrong bytes after a format change —
+                # rejected the whole response over one empty body. A single
+                # unfilled body therefore blanked the entire viewport, with a
+                # message about the API and the app being different versions.
                 meshes.append(
                     {
                         "id": body.id,
                         "of": body.of,
                         "quantity": body.quantity,
+                        "empty": True,
                         "placement": list(body.placement.to_matrix()),
-                        "positions": [], "normals": [], "indices": [],
+                        **_coordinates(Tessellation(), packed),
                         "faceRanges": [], "edges": [],
                     }
                 )
@@ -611,6 +637,7 @@ class ProjectService:
                     # face on any of them highlights the one named face.
                     "of": body.of,
                     "quantity": body.quantity,
+                    "empty": False,
                     "placement": list(body.placement.to_matrix()),
                     **_coordinates(tessellation, packed),
                     "faceRanges": [
@@ -1045,7 +1072,10 @@ class ProjectService:
             and (b.id == body if body is not None else not b.is_copy)
         ]
         if body is not None and not found:
-            raise DocumentError(reason=f"no body named {body!r} built", path="bodies")
+            # The same explanation the mesh exports give. This path used to have
+            # its own one-line version of it, wrong about an empty body in
+            # exactly the same way.
+            raise self._nothing_to_export(result, body)
         return found
 
     def _require(self, capability: str) -> None:

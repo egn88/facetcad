@@ -349,10 +349,19 @@ def _build_report(result: Mapping[str, Any]) -> dict[str, Any]:
             # in it reads exactly as it did before they existed.
             **({"of": body.get("of")} if body.get("of") else {}),
             **({"quantity": body.get("quantity")} if _many(body) else {}),
+            # Stated per body as well as in `warnings`: a caller reading the
+            # body list to decide what to export needs it on the row.
+            **({"empty": True} if body.get("empty") else {}),
         }
         for body in _rows(result.get("bodies"))
         if isinstance(body, Mapping)
     ]
+
+    # Per-body notes — "this body is empty", chiefly. Folded in with the
+    # feature warnings rather than given their own key, because a caller
+    # scanning one list for "what should I know?" must not have to know there
+    # are two.
+    warnings.extend(str(note) for note in _rows(result.get("warnings")))
 
     parameters = result.get("parameters")
     if isinstance(parameters, Mapping):
@@ -1040,6 +1049,12 @@ def add_body(
     display and export only and never reaches the modelled geometry, which is
     what lets you move a part around an assembly without perturbing a single
     face name.
+
+    **Add a feature to it in the same breath.** A body with no features builds
+    nothing: it will not appear in the viewport and cannot be exported. That is
+    not an error — it is what a body is between being created and being filled —
+    and every build report says so, as a `warnings` entry and `empty: true` on
+    the body's row. A body still marked `empty` is one you have not finished.
 
     For a part that appears more than once — four legs, six identical brackets —
     use `duplicate_body` rather than adding a second body and rebuilding the
